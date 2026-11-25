@@ -237,14 +237,16 @@ export function SettingsPanel() {
               <p className="text-small text-prose">
                 {drive?.connected
                   ? `Angemeldet${drive.account?.email ? ` als ${drive.account.email}` : ''}${drive.lasting ? ' (dauerhafte Hintergrund-Sitzung)' : ' (Sitzungstoken aktiv)'}.`
-                  : 'Direkt im Browser anmelden — oder per Link & QR-Code auf Ihrem Handy/PC bestätigen, falls Sondra AD auf einem Server ohne Bildschirm läuft.'}
+                  : drive?.configured
+                    ? 'Meldet sich per PKCE-Anmeldecode im Browser an — oder per Link & QR-Code auf Ihrem Handy/PC für Server ohne Bildschirm.'
+                    : 'Hinterlegen Sie unten Client-ID und Client-Secret Ihres Google-OAuth-Clients (Typ „Desktop-App“), damit sich Sondra AD dauerhaft anmelden kann.'}
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-[8px]">
-              <Button size="sm" disabled={busy !== null} onClick={() => void startGoogleSignIn(true)}>
+              <Button size="sm" disabled={busy !== null || !drive?.configured} onClick={() => void startGoogleSignIn(true)}>
                 {drive?.connected ? 'Neu verbinden' : 'Bei Google Drive anmelden'}
               </Button>
-              <Button variant="quiet" size="sm" disabled={busy !== null} onClick={() => void startGoogleSignIn(false)}>
+              <Button variant="quiet" size="sm" disabled={busy !== null || !drive?.configured} onClick={() => void startGoogleSignIn(false)}>
                 Server-Link / QR-Code
               </Button>
               {drive?.connected ? (
@@ -337,16 +339,19 @@ export function SettingsPanel() {
           </div>
         </Reveal>
 
-        <Reveal label="Eigene Google-OAuth-Client-Daten hinterlegen (für dauerhaften Server-Refresh ohne Ablauf)">
+        <Reveal
+          defaultOpen={!drive?.configured}
+          label="Google-OAuth-Client-Daten (Typ „Desktop-App“ aus Google Cloud)"
+        >
           <div className="grid grid-cols-1 gap-[14px] pt-[8px] sm:grid-cols-2">
-            <Field label="Google OAuth Client-ID" hint="Leer = integrierter Sondra-Standardclient.">
+            <Field label="Google OAuth Client-ID (Desktop-App)" hint="Dieselbe Desktop-Client-ID wie in Ihrer Sondra-App.">
               <TextInput
                 placeholder="…apps.googleusercontent.com"
                 value={config.googleClientId}
                 onChange={(e) => void updateConfig({ googleClientId: e.target.value })}
               />
             </Field>
-            <Field label="Google OAuth Client-Secret (Desktop-App / Web)" hint="Bleibt ausschließlich lokal auf diesem Rechner/Server.">
+            <Field label="Google OAuth Client-Secret" hint="Wird lokal gespeichert; für dauerhaften Refresh-Token erforderlich.">
               <TextInput
                 type="password"
                 placeholder="GOCSPX-…"

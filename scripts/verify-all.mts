@@ -521,6 +521,19 @@ async function main() {
     assert.equal(impRes.ok, true)
     assert.equal(impRes.config.browserCookies, 'firefox')
 
+    await assert.rejects(() => engine.driveAuth.startAuthFlow({ openBrowser: false }))
+    engine.store.saveConfig({
+      googleClientId: 'test-desktop-client.apps.googleusercontent.com',
+      googleClientSecret: 'test-desktop-secret',
+    })
+    const authStart = await engine.driveAuth.startAuthFlow({ openBrowser: false })
+    const parsedAuth = new URL(authStart.authUrl)
+    assert.equal(parsedAuth.searchParams.get('response_type'), 'code')
+    assert.equal(parsedAuth.searchParams.get('code_challenge_method'), 'S256')
+    assert.equal(parsedAuth.searchParams.get('access_type'), 'offline')
+    assert.ok(authStart.redirectUri.startsWith('http://127.0.0.1:'))
+    await engine.driveAuth.disconnect()
+
     await engine.driveAuth.setDirectRefreshToken({
       refreshToken: 'mock-refresh',
       accessToken: 'mock-access',

@@ -6,7 +6,6 @@ import os from 'node:os'
 import path from 'node:path'
 
 export const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file'
-export const DEFAULT_WEB_CLIENT_ID = '736809827454-0mtp3prv4tvrrm7p7v8pfmv25brccdpe.apps.googleusercontent.com'
 
 export const GOOGLE_ENDPOINTS = {
   auth: 'https://accounts.google.com/o/oauth2/v2/auth',
@@ -244,7 +243,7 @@ export function createDriveAuth({
       process.env.GOOGLE_CLIENT_ID?.trim() ||
       builtClientId?.trim() ||
       authData?.clientId ||
-      DEFAULT_WEB_CLIENT_ID
+      ''
     const clientSecret =
       cfg.googleClientSecret?.trim() ||
       process.env.SONDRA_GOOGLE_CLIENT_SECRET?.trim() ||
@@ -407,117 +406,86 @@ export function createDriveAuth({
     throw new Error('Keine gültige Google-Anmeldung empfangen.')
   }
 
-  async function startAuthFlow({ origin = '', openBrowser = false } = {}) {
+  async function startAuthFlow({ openBrowser = false } = {}) {
     closePending()
     const creds = resolveCredentials()
+    if (!creds.clientId || !creds.clientSecret) {
+      throw new Error(
+        'Google-Drive-Client (Typ „Desktop-App“) ist noch nicht hinterlegt. Bitte Client-ID und Client-Secret unten in den Einstellungen eintragen (oder in GitHub Actions als GOOGLE_CLIENT_ID und GOOGLE_CLIENT_SECRET hinterlegen).',
+      )
+    }
+
     const verifier = base64url(crypto.randomBytes(48))
     const challenge = base64url(crypto.createHash('sha256').update(verifier).digest())
     const state = base64url(crypto.randomBytes(16))
 
-    const useLoopbackPkce = Boolean(creds.clientSecret) || Boolean(openExternal)
-    if (useLoopbackPkce && creds.clientSecret) {
-      const loopback = await new Promise((resolve, reject) => {
-        const server = http.createServer(async (req, res) => {
-          const u = new URL(req.url || '/', 'http://127.0.0.1')
-          if (!u.searchParams.has('state') && !u.searchParams.has('code') && !u.searchParams.has('error')) {
-            res.statusCode = 404
-            res.end()
-            return
-          }
-          const incomingState = u.searchParams.get('state')
-          const error = u.searchParams.get('error')
-          const code = u.searchParams.get('code')
-          if (incomingState !== state || error || !code) {
-            res.setHeader('content-type', 'text/html; charset=utf-8')
-            res.end(answerHtml(false))
-            closePending()
-            return
-          }
-          try {
-            await finalizeAnswer({ code, state: incomingState }, pendingSession)
-            res.setHeader('content-type', 'text/html; charset=utf-8')
-            res.end(answerHtml(true))
-          } catch (err) {
-            res.setHeader('content-type', 'text/html; charset=utf-8')
-            res.end(answerHtml(false, err?.message))
-          } finally {
-            closePending()
-          }
-        })
-        server.on('error', reject)
-        server.listen(0, '127.0.0.1', () => {
-          resolve({ server, port: server.address().port })
-        })
+    const loopback = await new Promise((resolve, reject) => {
+      const server = http.createServer(async (req, res) => {
+        const u = new URL(req.url || '/', 'http://127.0.0.1')
+        if (!u.searchParams.has('state') && !u.searchParams.has('code') && !u.searchParams.has('error')) {
+          res.statusCode = 404
+          res.end()
+          return
+        }
+        const incomingState = u.searchParams.get('state')
+        const error = u.searchParams.get('error')
+        const code = u.searchParams.get('code')
+        if (incomingState !== state || error || !code) {
+          res.setHeader('content-type', 'text/html; charset=utf-8')
+          res.end(answerHtml(false))
+          closePending()
+          return
+        }
+        try {
+          await finalizeAnswer({ code, state: incomingState }, pendingSession)
+          res.setHeader('content-type', 'text/html; charset=utf-8')
+          res.end(answerHtml(true))
+        } catch (err) {
+          res.setHeader('content-type', 'text/html; charset=utf-8')
+          res.end(answerHtml(false, err?.message))
+        } finally {
+          closePending()
+        }
       })
+      server.on('error', reject)
+      server.listen(0, '127.0.0.1', () => {
+        resolve({ server, port: server.address().port })
+      })
+    })
 
-      const redirectUri = `http://127.0.0.1:${loopback.port}/`
-      const authUrl = new URL(endpoints.auth)
-      authUrl.search = new URLSearchParams({
-        client_id: creds.clientId,
-        redirect_uri: redirectUri,
-        response_type: 'code',
-        scope: DRIVE_SCOPE,
-        code_challenge: challenge,
-        code_challenge_method: 'S256',
-        state,
-        access_type: 'offline',
-        prompt: 'consent',
-      }).toString()
-
-      const timer = setTimeout(closePending, SIGN_IN_TIMEOUT)
-      timer.unref?.()
-      pendingSession = {
-        state,
-        verifier,
-        redirectUri,
-        creds,
-        server: loopback.server,
-        timer,
-        authUrl: authUrl.toString(),
-      }
-
-      if (openBrowser && openExternal) {
-        await openExternal(authUrl.toString())
-      }
-      return {
-        authUrl: authUrl.toString(),
-        redirectUri,
-        mode: 'code_pkce',
-        state,
-      }
-    }
-
-    const baseOrigin = origin || 'http://localhost:47210'
-    const redirectUri = `${baseOrigin.replace(/\/$/, '')}/google-drive.html`
+    const redirectUri = `http://127.0.0.1:${loopback.port}/`
     const authUrl = new URL(endpoints.auth)
     authUrl.search = new URLSearchParams({
       client_id: creds.clientId,
       redirect_uri: redirectUri,
-      response_type: creds.clientSecret ? 'code' : 'token',
+      response_type: 'code',
       scope: DRIVE_SCOPE,
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
       state,
-      include_granted_scopes: 'true',
-      ...(creds.clientSecret ? { access_type: 'offline', prompt: 'consent', code_challenge: challenge, code_challenge_method: 'S256' } : { prompt: 'select_account' }),
+      access_type: 'offline',
+      prompt: 'consent',
     }).toString()
 
     const timer = setTimeout(closePending, SIGN_IN_TIMEOUT)
     timer.unref?.()
     pendingSession = {
       state,
-      verifier: creds.clientSecret ? verifier : '',
+      verifier,
       redirectUri,
       creds,
-      server: null,
+      server: loopback.server,
       timer,
       authUrl: authUrl.toString(),
     }
+
     if (openBrowser && openExternal) {
       await openExternal(authUrl.toString())
     }
     return {
       authUrl: authUrl.toString(),
       redirectUri,
-      mode: creds.clientSecret ? 'web_code' : 'implicit_token',
+      mode: 'code_pkce',
       state,
     }
   }
@@ -736,7 +704,7 @@ export function createDriveAuth({
   function getStatus() {
     const creds = resolveCredentials()
     return {
-      configured: Boolean(creds.clientId),
+      configured: Boolean(creds.clientId && creds.clientSecret),
       hasClientSecret: Boolean(creds.clientSecret),
       connected: isConnected(),
       lasting: Boolean(authData?.refreshToken),
