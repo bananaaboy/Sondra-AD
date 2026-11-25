@@ -1,6 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { apiCall, useAppStore } from '../../state/appStore'
-import { createQrMatrix } from '../../lib/qrSvg'
 import type {
   AniworldLanguagePref,
   AudioFilePref,
@@ -33,9 +32,9 @@ export function SettingsPanel() {
   const bootstrap = useAppStore((s) => s.bootstrap)
 
   const [section, setSection] = useState<SettingsSection>('verbindung')
-  const [authDialog, setAuthDialog] = useState<{ authUrl: string; redirectUri: string; mode: string } | null>(null)
-  const [callbackInput, setCallbackInput] = useState('')
-  const [authError, setAuthError] = useState<string | null>(null)
+  const [pairDialogMode, setPairDialogMode] = useState<'import' | 'export' | null>(null)
+  const [pairError, setPairError] = useState<string | null>(null)
+  const [copiedBundle, setCopiedBundle] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [infoMsg, setInfoMsg] = useState<string | null>(null)
 
@@ -45,28 +44,10 @@ export function SettingsPanel() {
   const [importBundleText, setImportBundleText] = useState('')
   const [cookiesText, setCookiesText] = useState('')
 
-  useEffect(() => {
-    if (drive?.connected && authDialog) {
-      setAuthDialog(null)
-      setInfoMsg('Google Drive erfolgreich verbunden und mit Sondra synchronisiert.')
-    }
-  }, [drive?.connected, authDialog])
-
-  useEffect(() => {
-    if (!('BroadcastChannel' in window)) return undefined
-    const channel = new BroadcastChannel('sondra-ad-drive')
-    channel.onmessage = () => {
-      setAuthDialog(null)
-      void bootstrap()
-    }
-    return () => channel.close()
-  }, [bootstrap])
-
   if (!config) return null
 
-  const startGoogleSignIn = async (openInPopupOrSystem: boolean) => {
+  const startGoogleSignIn = async () => {
     setBusy('drive-start')
-    setAuthError(null)
     setInfoMsg(null)
     try {
       const isDesktop = Boolean(window.sondraAd?.isDesktopApp)
@@ -78,37 +59,15 @@ export function SettingsPanel() {
       }>('drive/start', {
         body: {
           origin: window.location.origin,
-          openBrowser: isDesktop && openInPopupOrSystem,
+          openBrowser: isDesktop,
         },
       })
-      if (openInPopupOrSystem) {
-        if (!isDesktop) {
-          window.open(res.authUrl, 'sondra-ad-google', 'popup,width=540,height=700')
-        }
-        setInfoMsg('Anmeldung wurde im Browser geöffnet. Bitte dort bei Google bestätigen — Sondra AD verbindet sich danach automatisch.')
-      } else {
-        setAuthDialog({ authUrl: res.authUrl, redirectUri: res.redirectUri, mode: res.mode })
+      if (!isDesktop) {
+        window.open(res.authUrl, 'sondra-ad-google', 'popup,width=540,height=700')
       }
+      setInfoMsg('Anmeldung wurde im Browser geöffnet. Bitte dort bei Google bestätigen — Sondra AD verbindet sich danach automatisch.')
     } catch (err) {
       setInfoMsg(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const finishManualCallback = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!callbackInput.trim()) return
-    setBusy('drive-callback')
-    setAuthError(null)
-    try {
-      await apiCall('drive/callback', { body: { input: callbackInput.trim() } })
-      setCallbackInput('')
-      setAuthDialog(null)
-      await bootstrap()
-      setInfoMsg('Google Drive erfolgreich verbunden und mit Sondra synchronisiert.')
-    } catch (err) {
-      setAuthError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(null)
     }
@@ -146,27 +105,39 @@ export function SettingsPanel() {
 
   const handleExportPairing = async () => {
     setBusy('pair-export')
-    setInfoMsg(null)
+    setPairError(null)
+    setCopiedBundle(false)
     try {
       const res = await apiCall<{ bundle: string }>('pairing/export', { body: { passphrase: pairPin } })
       setExportedBundle(res.bundle)
     } catch (err) {
-      setInfoMsg(err instanceof Error ? err.message : String(err))
+      setPairError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(null)
     }
   }
 
+  const handleCopyBundle = async () => {
+    if (!exportedBundle) return
+    try {
+      await navigator.clipboard.writeText(exportedBundle)
+      setCopiedBundle(true)
+      setTimeout(() => setCopiedBundle(false), 2000)
+    } catch {}
+  }
+
   const handleImportPairing = async () => {
     setBusy('pair-import')
-    setInfoMsg(null)
+    setPairError(null)
     try {
       await apiCall('pairing/import', { body: { bundle: importBundleText, passphrase: pairPin } })
       setImportBundleText('')
+      setPairPin('')
+      setPairDialogMode(null)
       await bootstrap()
-      setInfoMsg('Kopplungspaket erfolgreich übernommen.')
+      setInfoMsg('Kopplungspaket erfolgreich übernommen — Google Drive ist verbunden.')
     } catch (err) {
-      setInfoMsg(err instanceof Error ? err.message : String(err))
+      setPairError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(null)
     }
@@ -227,8 +198,6 @@ export function SettingsPanel() {
     void updateConfig({ hosterPriority: list })
   }
 
-  const qrMatrix = authDialog ? createQrMatrix(authDialog.authUrl) : null
-
   return (
     <div className="flex flex-col gap-[24px]">
       <div className="flex flex-col justify-between gap-[14px] sm:flex-row sm:items-end">
@@ -280,11 +249,20 @@ export function SettingsPanel() {
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-[8px]">
-                <Button size="sm" disabled={busy !== null || !drive?.configured} onClick={() => void startGoogleSignIn(true)}>
-                  {drive?.connected ? 'Neu verbinden' : 'Anmelden'}
+                <Button size="sm" disabled={busy !== null || !drive?.configured} onClick={() => void startGoogleSignIn()}>
+                  {drive?.connected ? 'Neu verbinden' : 'Im Browser anmelden'}
                 </Button>
-                <Button variant="quiet" size="sm" disabled={busy !== null || !drive?.configured} onClick={() => void startGoogleSignIn(false)}>
-                  QR-Code / Link
+                <Button
+                  variant="quiet"
+                  size="sm"
+                  disabled={busy !== null}
+                  onClick={() => {
+                    setPairError(null)
+                    setExportedBundle('')
+                    setPairDialogMode(drive?.connected ? 'export' : 'import')
+                  }}
+                >
+                  Mit anderem Gerät koppeln
                 </Button>
                 {drive?.connected ? (
                   <Button variant="ghost" size="sm" disabled={busy !== null} onClick={() => void handleDisconnectDrive()}>
@@ -322,49 +300,6 @@ export function SettingsPanel() {
               </div>
             </Card>
           </div>
-
-          <Reveal label="Kopplungspaket für einen zweiten Rechner oder Server">
-            <div className="grid grid-cols-1 gap-[16px] pt-[10px] lg:grid-cols-2">
-              <div className="flex flex-col gap-[10px]">
-                <Field label="Passwort (mind. 4 Zeichen)" hint="Verschlüsselt Anmeldung und Cookies mit AES-256.">
-                  <TextInput
-                    type="password"
-                    placeholder="Kopplungscode"
-                    value={pairPin}
-                    onChange={(e) => setPairPin(e.target.value)}
-                  />
-                </Field>
-                <div>
-                  <Button variant="quiet" size="sm" disabled={pairPin.length < 4 || busy !== null} onClick={() => void handleExportPairing()}>
-                    Paket erzeugen
-                  </Button>
-                </div>
-                {exportedBundle ? (
-                  <TextInput readOnly value={exportedBundle} onFocus={(e) => e.currentTarget.select()} />
-                ) : null}
-              </div>
-
-              <div className="flex flex-col gap-[10px]">
-                <Field label="Paket einspielen" hint="Passwort links eingeben und Pakettext hier einfügen.">
-                  <TextInput
-                    placeholder="SONDRA-AD-PAIR-1.…"
-                    value={importBundleText}
-                    onChange={(e) => setImportBundleText(e.target.value)}
-                  />
-                </Field>
-                <div>
-                  <Button
-                    variant="quiet"
-                    size="sm"
-                    disabled={!importBundleText.trim() || pairPin.length < 4 || busy !== null}
-                    onClick={() => void handleImportPairing()}
-                  >
-                    Importieren
-                  </Button>
-                </div>
-              </div>
-            </div>
-          </Reveal>
 
           <Reveal
             defaultOpen={!drive?.configured}
@@ -824,65 +759,113 @@ export function SettingsPanel() {
       ) : null}
 
       <Dialog
-        open={authDialog !== null}
-        onClose={() => setAuthDialog(null)}
-        title="Mit Google Drive verbinden (QR-Code / Server)"
+        open={pairDialogMode !== null}
+        onClose={() => setPairDialogMode(null)}
+        title="Mit anderem Gerät koppeln"
         size="md"
       >
-        {authDialog ? (
+        {pairDialogMode ? (
           <div className="flex flex-col gap-[18px]">
-            <div className="grid grid-cols-1 items-center gap-[20px] sm:grid-cols-[160px_1fr]">
-              {qrMatrix ? (
-                <div className="mx-auto rounded-card bg-raised p-[12px] ring-1 ring-line">
-                  <svg
-                    viewBox={`0 0 ${qrMatrix.size} ${qrMatrix.size}`}
-                    className="h-[136px] w-[136px] text-ink"
-                    shapeRendering="crispEdges"
-                  >
-                    {qrMatrix.cells.map((row, r) =>
-                      row.map((dark, c) =>
-                        dark ? <rect key={`${r}-${c}`} x={c} y={r} width={1} height={1} fill="currentColor" /> : null,
-                      ),
-                    )}
-                  </svg>
-                </div>
-              ) : null}
+            <div className="flex flex-wrap gap-[6px]">
+              <button
+                type="button"
+                onClick={() => {
+                  setPairError(null)
+                  setPairDialogMode('import')
+                }}
+                className={`press rounded-pill px-[12px] py-[6px] text-small font-medium ${
+                  pairDialogMode === 'import' ? 'bg-ink font-semibold text-on-ink' : 'bg-panel-soft text-prose hover:text-ink'
+                }`}
+              >
+                Auf diesem Gerät einspielen
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setPairError(null)
+                  setPairDialogMode('export')
+                }}
+                className={`press rounded-pill px-[12px] py-[6px] text-small font-medium ${
+                  pairDialogMode === 'export' ? 'bg-ink font-semibold text-on-ink' : 'bg-panel-soft text-prose hover:text-ink'
+                }`}
+              >
+                Für Server / anderen PC erstellen
+              </button>
+            </div>
 
-              <div className="flex flex-col gap-[8px]">
+            {pairDialogMode === 'import' ? (
+              <div className="flex flex-col gap-[14px]">
                 <p className="text-small text-prose">
-                  Auf demselben PC einfach <strong>„Im Browser öffnen“</strong> klicken — dann klappt die Rückmeldung automatisch.
+                  Überträgt eine bestehende Google-Drive-Anmeldung samt Einstellungen verschlüsselt von deinem Hauptrechner — ganz ohne Browser-Anmeldung auf diesem Gerät.
                 </p>
-                <p className="text-micro text-muted">
-                  Auf einem Handy oder zweiten Gerät: QR-Code scannen und bei Google zulassen. Danach zeigt das Handy kurz eine „127.0.0.1 nicht erreichbar“-Seite (das ist bei Google-Desktop-Anmeldungen normal). Kopiere diese komplette Adresse aus der Handy-Adresszeile und füge sie unten ein.
-                </p>
-                <TextInput readOnly value={authDialog.authUrl} onFocus={(e) => e.currentTarget.select()} />
-                <div>
+                <Field label="Kopplungspaket">
+                  <TextInput
+                    placeholder="SONDRA-AD-PAIR-1.…"
+                    value={importBundleText}
+                    onChange={(e) => setImportBundleText(e.target.value)}
+                    autoFocus
+                  />
+                </Field>
+                <Field label="Passwort (mind. 4 Zeichen)">
+                  <TextInput
+                    type="password"
+                    placeholder="Dasselbe Passwort wie beim Erstellen"
+                    value={pairPin}
+                    onChange={(e) => setPairPin(e.target.value)}
+                  />
+                </Field>
+                {pairError ? <p className="text-small text-ink">! {pairError}</p> : null}
+                <div className="flex justify-end gap-[10px] border-t border-line pt-[14px]">
+                  <Button variant="quiet" size="sm" onClick={() => setPairDialogMode(null)}>
+                    Abbrechen
+                  </Button>
                   <Button
-                    variant="quiet"
                     size="sm"
-                    onClick={() => window.open(authDialog.authUrl, '_blank', 'noopener')}
+                    disabled={!importBundleText.trim() || pairPin.length < 4 || busy !== null}
+                    onClick={() => void handleImportPairing()}
                   >
-                    Im Browser auf diesem PC öffnen
+                    {busy === 'pair-import' ? 'Verbindet …' : 'Verbinden'}
                   </Button>
                 </div>
               </div>
-            </div>
-
-            <form onSubmit={(e) => void finishManualCallback(e)} className="flex flex-col gap-[10px] border-t border-line pt-[14px]">
-              <SectionHead rule={false}>Rückgabe-Adresse vom Handy / zweiten Gerät einfügen</SectionHead>
-              <div className="flex flex-col gap-[8px] sm:flex-row">
-                <TextInput
-                  placeholder="http://127.0.0.1:…/?state=…&code=…"
-                  value={callbackInput}
-                  onChange={(e) => setCallbackInput(e.target.value)}
-                  className="flex-1"
-                />
-                <Button type="submit" size="sm" disabled={!callbackInput.trim() || busy === 'drive-callback'}>
-                  Übernehmen
-                </Button>
+            ) : (
+              <div className="flex flex-col gap-[14px]">
+                <p className="text-small text-prose">
+                  Verpackt deine aktuelle Google-Drive-Anmeldung, Cookies und Grundeinstellungen AES-256-verschlüsselt für einen Server oder zweiten Laptop.
+                </p>
+                <Field label="Eigenes Passwort zum Schützen (mind. 4 Zeichen)">
+                  <TextInput
+                    type="password"
+                    placeholder="Passwort wählen"
+                    value={pairPin}
+                    onChange={(e) => setPairPin(e.target.value)}
+                    autoFocus
+                  />
+                </Field>
+                <div>
+                  <Button
+                    size="sm"
+                    disabled={pairPin.length < 4 || busy !== null}
+                    onClick={() => void handleExportPairing()}
+                  >
+                    {busy === 'pair-export' ? 'Erzeugt …' : 'Kopplungspaket erzeugen'}
+                  </Button>
+                </div>
+                {exportedBundle ? (
+                  <div className="flex flex-col gap-[8px] border-t border-line pt-[12px]">
+                    <Field label="Fertiges Kopplungspaket">
+                      <div className="flex gap-[8px]">
+                        <TextInput readOnly value={exportedBundle} onFocus={(e) => e.currentTarget.select()} />
+                        <Button variant="quiet" size="sm" onClick={() => void handleCopyBundle()}>
+                          {copiedBundle ? 'Kopiert' : 'Kopieren'}
+                        </Button>
+                      </div>
+                    </Field>
+                  </div>
+                ) : null}
+                {pairError ? <p className="text-small text-ink">! {pairError}</p> : null}
               </div>
-              {authError ? <p className="text-small text-ink">! {authError}</p> : null}
-            </form>
+            )}
           </div>
         ) : null}
       </Dialog>

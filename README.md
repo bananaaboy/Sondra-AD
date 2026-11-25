@@ -19,12 +19,11 @@ Sondra AD verbindet sich mit demselben `Sondra`-Ordner in Google Drive (`drive.f
 
 ## Verbindung mit Sondra & Google Drive
 
-Sondra AD unterstützt vier Wege zur Anmeldung, damit sowohl lokale Windows-Rechner als auch entfernte Server ohne Bildschirm unkompliziert eingerichtet werden können:
+Sondra AD unterstützt drei Wege zur Anmeldung, damit sowohl lokale Windows-Rechner als auch entfernte Server ohne Bildschirm unkompliziert eingerichtet werden können:
 
 1. **Übernahme aus einer lokalen Sondra-App:** Erkennt eine bestehende Installation unter `%APPDATA%\Sondra` automatisch und übernimmt Google-Drive-Anmeldung, `Sondra-Merkliste.sqlite`, Cookie-Quelle, Netzwerkadapter sowie vorhandene `yt-dlp`- und `ffmpeg`-Werkzeuge mit einem Klick.
-2. **Direkte Anmeldung im Browser:** Öffnet den OAuth-Ablauf lokal und speichert den Schlüssel verschlüsselt über die Betriebssystem-Schlüsselverwaltung.
-3. **Server-Link & QR-Code:** Erzeugt auf einem kopflosen Server eine Anmeldeadresse samt lokal gezeichnetem QR-Code; nach der Bestätigung auf Handy oder PC lässt sich die Rücksprung-Adresse einfügen.
-4. **Verschlüsseltes Kopplungspaket (`SONDRA-AD-PAIR-1.`):** Exportiert Anmeldung, Cookies und Grundeinstellungen auf dem Hauptrechner mit Passwort (PBKDF2-SHA256 + AES-256-GCM) zur direkten Übernahme auf einem Server.
+2. **Direkte Anmeldung im Browser:** Öffnet den OAuth-PKCE-Ablauf lokal und speichert den Schlüssel verschlüsselt über die Betriebssystem-Schlüsselverwaltung.
+3. **Mit anderem Gerät koppeln (`SONDRA-AD-PAIR-1.`):** Exportiert Anmeldung, Cookies und Grundeinstellungen auf dem Hauptrechner mit Passwort (PBKDF2-SHA256 + AES-256-GCM) zur direkten Übernahme auf einem Server oder zweiten Laptop — ganz ohne Browser auf dem Zielgerät.
 
 Zusätzlich trägt sich Sondra AD mit einem ECDSA-P-256-signierten Geräteeintrag unter `Sondra/Geräte/` ein.
 

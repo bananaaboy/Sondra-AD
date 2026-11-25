@@ -789,10 +789,10 @@ SOFTWARE.`}</pre>
               <div className="flex flex-col gap-[12px] border-t border-line pt-[20px]">
                 <h3 className="display-sm">3. Kopfloser Laptop oder Server</h3>
                 <p className="text-body text-prose">
-                  Soll Sondra AD auf einem separaten Heimserver oder VPS ohne Bildschirm laufen, können Sie auf Ihrem
-                  Hauptrechner in den Einstellungen ein passwortgeschütztes Kopplungspaket (
-                  <span className="value">SONDRA-AD-PAIR-1.</span>, AES-256-GCM) erzeugen oder den QR-Code der
-                  Server-Anmeldung mit dem Smartphone bestätigen.
+                  Soll Sondra AD auf einem separaten Heimserver oder VPS ohne Bildschirm laufen, kannst du auf deinem
+                  Hauptrechner unter <em>Einstellungen → Verbindung → Mit anderem Gerät koppeln</em> ein
+                  passwortgeschütztes Kopplungspaket (<span className="value">SONDRA-AD-PAIR-1.</span>, AES-256-GCM)
+                  erzeugen und auf dem Server einspielen — ganz ohne Browser-Anmeldung auf dem Server.
                 </p>
               </div>
             </div>
@@ -805,7 +805,7 @@ SOFTWARE.`}</pre>
           <p className="max-w-[60ch] leading-[1.6]">
             Sondra AD · Automatischer Hintergrund-Downloader für Windows (Microsoft Store & .exe) und Server.
           </p>
-          <p className="value text-micro text-muted">v1.0.2 · keine Cookies · kein Tracking · MIT-Lizenz</p>
+          <p className="value text-micro text-muted">v1.0.3 · keine Cookies · kein Tracking · MIT-Lizenz</p>
         </div>
         <p className="flex flex-wrap gap-x-[16px] gap-y-[4px]">
           <button
