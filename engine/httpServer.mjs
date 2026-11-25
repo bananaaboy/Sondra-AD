@@ -290,7 +290,7 @@ export async function createEngineServer({
           if (body.reset) {
             delete overrides[seriesId]
           } else {
-            overrides[seriesId] = { ...(overrides[seriesId] || {}), ...(body.override || {}) }
+            overrides[seriesId] = { ...(body.override || {}) }
           }
           const updated = store.saveConfig({ seriesOverrides: overrides })
           return sendJson(res, 200, { ok: true, config: updated })
@@ -314,6 +314,11 @@ export async function createEngineServer({
         if (route === 'queue/cancel' && req.method === 'POST') {
           worker.cancelJob(String(body.id || ''))
           return sendJson(res, 200, { ok: true, queue: store.getQueue() })
+        }
+
+        if (route === 'queue/cancel-all' && req.method === 'POST') {
+          const count = worker.cancelAllJobs()
+          return sendJson(res, 200, { ok: true, count, queue: store.getQueue() })
         }
 
         if (route === 'queue/remove' && req.method === 'POST') {

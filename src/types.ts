@@ -56,6 +56,13 @@ export type StorageTarget = 'drive_only' | 'drive_and_local' | 'local_only'
 export type BacklogMode = 'from_current' | 'new_only' | 'all_unwatched'
 export type InactivityAction = 'drive_archive' | 'compress_archive' | 'offload_local' | 'pause_series' | 'delete'
 
+export interface SeasonDownloadRule {
+  enabled: boolean
+  fromEpisode?: number | null
+  toEpisode?: number | null
+  maxEpisodes?: number | null
+}
+
 export interface SeriesOverride {
   enabled?: boolean
   language?: AniworldLanguagePref
@@ -63,6 +70,7 @@ export interface SeriesOverride {
   videoPref?: VideoFilePref
   backlogMode?: BacklogMode
   lookaheadLimit?: number
+  seasonRules?: Record<string, SeasonDownloadRule>
 }
 
 export interface AdConfig {

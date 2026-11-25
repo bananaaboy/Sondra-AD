@@ -6,6 +6,7 @@ import type {
   BacklogMode,
   SavedLinkItem,
   SavedLinkStatus,
+  SeasonDownloadRule,
   SeriesOverride,
   VideoFilePref,
 } from '../../types'
@@ -455,17 +456,206 @@ function SeriesOverrideDialog({
     typeof current?.lookaheadLimit === 'number' ? String(current.lookaheadLimit) : '',
   )
 
+  const discoveredNumbers = (() => {
+    const nums = new Set<number>()
+    for (const s of item.seasons || []) {
+      if (s.number > 0) nums.add(s.number)
+    }
+    const maxS = Math.max(item.onlineAvailable?.maxSeason || 0, item.season || 1, 1)
+    for (let i = 1; i <= maxS; i += 1) nums.add(i)
+    for (const key of Object.keys(current?.seasonRules || {})) {
+      const n = Number(key)
+      if (Number.isFinite(n) && n > 0) nums.add(n)
+    }
+    return [...nums].sort((a, b) => a - b)
+  })()
+
+  const [seasonNumbers, setSeasonNumbers] = useState<number[]>(discoveredNumbers)
+  const [seasonRules, setSeasonRules] = useState<Record<string, SeasonDownloadRule>>(() => {
+    const init: Record<string, SeasonDownloadRule> = {}
+    for (const n of discoveredNumbers) {
+      const existing = current?.seasonRules?.[String(n)]
+      init[String(n)] = existing
+        ? {
+            enabled: existing.enabled !== false,
+            fromEpisode: existing.fromEpisode ?? null,
+            toEpisode: existing.toEpisode ?? null,
+            maxEpisodes: existing.maxEpisodes ?? null,
+          }
+        : { enabled: true, fromEpisode: null, toEpisode: null, maxEpisodes: null }
+    }
+    return init
+  })
+
+  const seasonEpisodeCounts = new Map<number, number | null>()
+  for (const s of item.seasons || []) {
+    seasonEpisodeCounts.set(s.number, s.episodes)
+  }
+
+  const updateSeasonRule = (seasonNum: number, patch: Partial<SeasonDownloadRule>) => {
+    const key = String(seasonNum)
+    setSeasonRules((prev) => ({
+      ...prev,
+      [key]: {
+        ...(prev[key] || { enabled: true, fromEpisode: null, toEpisode: null, maxEpisodes: null }),
+        ...patch,
+      },
+    }))
+  }
+
+  const setAllSeasonsEnabled = (flag: boolean) => {
+    setSeasonRules((prev) => {
+      const next: Record<string, SeasonDownloadRule> = {}
+      for (const n of seasonNumbers) {
+        const key = String(n)
+        next[key] = { ...(prev[key] || { fromEpisode: null, toEpisode: null, maxEpisodes: null }), enabled: flag }
+      }
+      return next
+    })
+  }
+
+  const addNextSeason = () => {
+    const nextNum = seasonNumbers.length > 0 ? Math.max(...seasonNumbers) + 1 : 1
+    setSeasonNumbers((prev) => [...prev, nextNum])
+    setSeasonRules((prev) => ({
+      ...prev,
+      [String(nextNum)]: { enabled: true, fromEpisode: null, toEpisode: null, maxEpisodes: null },
+    }))
+  }
+
+  const handleApply = () => {
+    const cleanedRules: Record<string, SeasonDownloadRule> = {}
+    let hasCustomSeasonRule = false
+    for (const n of seasonNumbers) {
+      const r = seasonRules[String(n)]
+      if (!r) continue
+      const fromEpisode = typeof r.fromEpisode === 'number' && r.fromEpisode > 0 ? r.fromEpisode : null
+      const toEpisode = typeof r.toEpisode === 'number' && r.toEpisode > 0 ? r.toEpisode : null
+      const maxEpisodes = typeof r.maxEpisodes === 'number' && r.maxEpisodes > 0 ? r.maxEpisodes : null
+      if (!r.enabled || fromEpisode || toEpisode || maxEpisodes) {
+        hasCustomSeasonRule = true
+      }
+      cleanedRules[String(n)] = {
+        enabled: r.enabled,
+        ...(fromEpisode ? { fromEpisode } : {}),
+        ...(toEpisode ? { toEpisode } : {}),
+        ...(maxEpisodes ? { maxEpisodes } : {}),
+      }
+    }
+
+    void onSave({
+      enabled,
+      ...(language ? { language } : {}),
+      ...(mode ? { mode } : {}),
+      ...(videoPref ? { videoPref } : {}),
+      ...(backlogMode ? { backlogMode } : {}),
+      ...(lookaheadLimit.trim() !== '' ? { lookaheadLimit: Math.max(0, Number(lookaheadLimit) || 0) } : {}),
+      ...(hasCustomSeasonRule ? { seasonRules: cleanedRules } : {}),
+    })
+  }
+
   return (
-    <Dialog open onClose={onClose} title={`Auto-Download-Regel: ${item.title}`} size="md">
-      <div className="flex flex-col gap-[16px]">
-        <SectionHead rule={false}>Einzelregel für diese Serie</SectionHead>
+    <Dialog open onClose={onClose} title={`Regeln: ${item.title}`} size="lg">
+      <div className="flex flex-col gap-[18px]">
         <Toggle
           label="Serie automatisch überwachen und herunterladen"
           checked={enabled}
           onChange={setEnabled}
         />
 
-        <div className="grid grid-cols-1 gap-[14px] sm:grid-cols-2">
+        <div className="flex flex-col gap-[10px] border-t border-line pt-[14px]">
+          <div className="flex flex-wrap items-center justify-between gap-[8px]">
+            <div>
+              <SectionHead rule={false}>Staffel-spezifische Downloads</SectionHead>
+              <p className="text-micro text-muted">
+                Lege für jede Staffel fest, ob sie geladen werden darf, ab/bis welcher Folge und wie viele Folgen maximal.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-[6px]">
+              <Button type="button" variant="ghost" size="sm" onClick={() => setAllSeasonsEnabled(true)}>
+                Alle an
+              </Button>
+              <Button type="button" variant="ghost" size="sm" onClick={() => setAllSeasonsEnabled(false)}>
+                Alle aus
+              </Button>
+              <Button type="button" variant="quiet" size="sm" onClick={addNextSeason}>
+                + Staffel
+              </Button>
+            </div>
+          </div>
+
+          <div className="divide-y divide-line rounded-card bg-panel-soft/60 px-[12px] ring-1 ring-inset ring-line">
+            {seasonNumbers.map((num) => {
+              const r = seasonRules[String(num)] || { enabled: true }
+              const epCount = seasonEpisodeCounts.get(num)
+              return (
+                <div
+                  key={num}
+                  className="grid grid-cols-1 items-center gap-[10px] py-[10px] sm:grid-cols-[150px_1fr_1fr_1fr]"
+                >
+                  <div className="flex items-center gap-[8px]">
+                    <Toggle
+                      label={`Staffel ${num}`}
+                      hint={typeof epCount === 'number' ? `${epCount} Folgen` : undefined}
+                      checked={r.enabled !== false}
+                      onChange={(val) => updateSeasonRule(num, { enabled: val })}
+                    />
+                  </div>
+
+                  <label className="flex flex-col gap-[2px]">
+                    <span className="text-micro text-muted">Ab Folge</span>
+                    <TextInput
+                      type="number"
+                      min={1}
+                      disabled={!r.enabled}
+                      placeholder="1"
+                      value={r.fromEpisode ?? ''}
+                      onChange={(e) =>
+                        updateSeasonRule(num, {
+                          fromEpisode: e.target.value.trim() ? Math.max(1, Number(e.target.value) || 1) : null,
+                        })
+                      }
+                    />
+                  </label>
+
+                  <label className="flex flex-col gap-[2px]">
+                    <span className="text-micro text-muted">Bis Folge</span>
+                    <TextInput
+                      type="number"
+                      min={1}
+                      disabled={!r.enabled}
+                      placeholder={typeof epCount === 'number' ? String(epCount) : 'alle'}
+                      value={r.toEpisode ?? ''}
+                      onChange={(e) =>
+                        updateSeasonRule(num, {
+                          toEpisode: e.target.value.trim() ? Math.max(1, Number(e.target.value) || 1) : null,
+                        })
+                      }
+                    />
+                  </label>
+
+                  <label className="flex flex-col gap-[2px]">
+                    <span className="text-micro text-muted">Max. Folgen</span>
+                    <TextInput
+                      type="number"
+                      min={0}
+                      disabled={!r.enabled}
+                      placeholder="unbegrenzt"
+                      value={r.maxEpisodes ?? ''}
+                      onChange={(e) =>
+                        updateSeasonRule(num, {
+                          maxEpisodes: e.target.value.trim() ? Math.max(0, Number(e.target.value) || 0) : null,
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-[14px] border-t border-line pt-[14px] sm:grid-cols-2">
           <Field label="Wunschsprache">
             <Select value={language} onChange={(e) => setLanguage(e.target.value as AniworldLanguagePref | '')}>
               <option value="">Globale Einstellung nutzen</option>
@@ -504,8 +694,8 @@ function SeriesOverrideDialog({
           </Field>
 
           <Field
-            label="Vorrats-Limit (ungesehene Folgen im Voraus)"
-            hint="Leer = globale Vorgabe; 0 = unbegrenzt; z. B. 3 = immer höchstens die nächsten 3 Folgen vorladen."
+            label="Vorrats-Limit insgesamt (0 = unbegrenzt)"
+            hint="Leer = globale Vorgabe; begrenzt, wie viele ungesehene Folgen gleichzeitig vorgeladen werden."
             className="sm:col-span-2"
           >
             <TextInput
@@ -521,7 +711,7 @@ function SeriesOverrideDialog({
         <div className="flex flex-wrap items-center justify-between gap-[12px] border-t border-line pt-[16px]">
           {current ? (
             <Button variant="ghost" size="sm" onClick={() => void onSave(null)}>
-              Auf globalen Standard zurücksetzen
+              Auf Standard zurücksetzen
             </Button>
           ) : (
             <span />
@@ -530,20 +720,8 @@ function SeriesOverrideDialog({
             <Button variant="quiet" size="sm" onClick={onClose}>
               Abbrechen
             </Button>
-            <Button
-              size="sm"
-              onClick={() =>
-                void onSave({
-                  enabled,
-                  ...(language ? { language } : {}),
-                  ...(mode ? { mode } : {}),
-                  ...(videoPref ? { videoPref } : {}),
-                  ...(backlogMode ? { backlogMode } : {}),
-                  ...(lookaheadLimit.trim() !== '' ? { lookaheadLimit: Math.max(0, Number(lookaheadLimit) || 0) } : {}),
-                })
-              }
-            >
-              Regel übernehmen
+            <Button size="sm" onClick={handleApply}>
+              Regeln übernehmen
             </Button>
           </div>
         </div>

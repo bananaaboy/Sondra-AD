@@ -122,6 +122,7 @@ export interface AppState {
   retryJob: (id: string, preferredHoster?: string | null) => Promise<void>
   retryAllFailed: () => Promise<number>
   cancelJob: (id: string) => Promise<void>
+  cancelAllJobs: () => Promise<number>
   removeJob: (id: string) => Promise<void>
   clearCompletedJobs: () => Promise<void>
   clearLogs: () => Promise<void>
@@ -329,6 +330,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   cancelJob: async (id) => {
     const res = await apiCall<{ queue: QueueJob[] }>('queue/cancel', { body: { id } })
     set({ queue: res.queue })
+  },
+
+  cancelAllJobs: async () => {
+    const res = await apiCall<{ count: number; queue: QueueJob[] }>('queue/cancel-all', { body: {} })
+    set({ queue: res.queue })
+    return res.count
   },
 
   removeJob: async (id) => {

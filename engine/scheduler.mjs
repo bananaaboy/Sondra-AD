@@ -38,6 +38,7 @@ export function createScheduler({ store, driveAuth, driveService, mediaTools, wo
 
   function selectEpisodesForSeries(item, discoveredSeasons, cfg) {
     const override = cfg.seriesOverrides?.[item.id] || {}
+    const seasonRules = override.seasonRules && typeof override.seasonRules === 'object' ? override.seasonRules : null
     const backlogMode = override.backlogMode || cfg.backlogMode || 'from_current'
     const lookahead =
       typeof override.lookaheadLimit === 'number' ? override.lookaheadLimit : Number(cfg.lookaheadLimit) || 0
@@ -53,7 +54,26 @@ export function createScheduler({ store, driveAuth, driveService, mediaTools, wo
       .sort((a, b) => a.number - b.number)
 
     for (const s of sortedSeasons) {
+      const sRule = seasonRules ? (seasonRules[String(s.number)] ?? seasonRules[s.number] ?? null) : null
+      if (sRule && sRule.enabled === false) continue
+
+      const fromEp = typeof sRule?.fromEpisode === 'number' && sRule.fromEpisode > 0 ? sRule.fromEpisode : null
+      const toEp = typeof sRule?.toEpisode === 'number' && sRule.toEpisode > 0 ? sRule.toEpisode : null
+      const maxEp = typeof sRule?.maxEpisodes === 'number' && sRule.maxEpisodes > 0 ? sRule.maxEpisodes : null
+      const hasExplicitSeasonRule = Boolean(sRule && sRule.enabled === true && (fromEp || toEp || maxEp))
+
+      let existingInSeason = 0
+      if (maxEp) {
+        for (let epCheck = 1; epCheck <= s.episodes; epCheck += 1) {
+          if (store.hasEpisode(item.id, s.number, epCheck)) existingInSeason += 1
+        }
+      }
+      let addedInSeason = 0
+
       for (let ep = 1; ep <= s.episodes; ep += 1) {
+        if (fromEp && ep < fromEp) continue
+        if (toEp && ep > toEp) continue
+        if (maxEp && existingInSeason + addedInSeason >= maxEp) break
         if (isEpisodeWatched(item, s.number, ep)) continue
         if (store.hasEpisode(item.id, s.number, ep)) continue
 
@@ -62,22 +82,25 @@ export function createScheduler({ store, driveAuth, driveService, mediaTools, wo
             (s.number === prevOnline.maxSeason && ep > prevOnline.maxEpisode)
           : false
 
-        if (status === 'done') {
-          const knownSeason = (item.seasons || []).find((ks) => ks.number === s.number)
-          const beyondKnown =
-            !knownSeason ||
-            (typeof knownSeason.episodes === 'number' && ep > knownSeason.episodes) ||
-            isBrandNewOnline
-          if (!beyondKnown) continue
-        } else if (backlogMode === 'new_only') {
-          if (!prevOnline) continue
-          if (!isBrandNewOnline) continue
-        } else if (backlogMode === 'from_current') {
-          if (s.number < curSeason) continue
-          if (s.number === curSeason && ep < curEpisode) continue
+        if (!hasExplicitSeasonRule) {
+          if (status === 'done') {
+            const knownSeason = (item.seasons || []).find((ks) => ks.number === s.number)
+            const beyondKnown =
+              !knownSeason ||
+              (typeof knownSeason.episodes === 'number' && ep > knownSeason.episodes) ||
+              isBrandNewOnline
+            if (!beyondKnown) continue
+          } else if (backlogMode === 'new_only') {
+            if (!prevOnline) continue
+            if (!isBrandNewOnline) continue
+          } else if (backlogMode === 'from_current') {
+            if (s.number < curSeason) continue
+            if (s.number === curSeason && ep < curEpisode) continue
+          }
         }
 
         candidates.push({ season: s.number, episode: ep })
+        addedInSeason += 1
       }
     }
 

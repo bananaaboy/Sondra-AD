@@ -669,6 +669,46 @@ async function main() {
     assert.ok(dlIdx)
     assert.ok(dlIdx.drivePath.startsWith('Serien/Frieren/Staffel 2/'))
 
+    console.log('9. Prüfe Staffel-spezifische Regeln & Alle-abbrechen …')
+    engine.worker.clearCompletedJobs()
+    engine.store.unmarkEpisode('frieren-id', 1, 2)
+    engine.store.unmarkEpisode('frieren-id', 1, 3)
+    engine.store.saveConfig({
+      enabled: false,
+      seriesOverrides: {
+        'frieren-id': {
+          enabled: true,
+          seasonRules: {
+            '1': { enabled: true, fromEpisode: 2, toEpisode: 3, maxEpisodes: 1 },
+            '2': { enabled: false },
+          },
+        },
+      },
+    })
+    engine.store.saveMerkliste(
+      engine.store.getMerkItems().map((m) => ({
+        ...m,
+        status: 'watching',
+        season: 1,
+        episode: 1,
+        updatedAt: Date.now() + 10_000,
+        seasons: [
+          { number: 1, episodes: 3, watched: [] },
+          { number: 2, episodes: 1, watched: [] },
+        ],
+      })),
+    )
+    const beforeQueueLen = engine.store.getQueue().length
+    const seasonCheck = await engine.scheduler.runCheckCycle({ reason: 'manual', seriesId: 'frieren-id' })
+    assert.equal(seasonCheck.totalQueued, 1)
+    const addedJob = engine.store.getQueue()[beforeQueueLen]
+    assert.equal(addedJob.season, 1)
+    assert.equal(addedJob.episode, 2)
+
+    const cancelledCount = engine.worker.cancelAllJobs()
+    assert.equal(cancelledCount, 1)
+    assert.equal(engine.store.getQueue()[beforeQueueLen].status, 'cancelled')
+
     console.log('Alle Prüfungen erfolgreich bestanden.')
   } finally {
     await engine.close()

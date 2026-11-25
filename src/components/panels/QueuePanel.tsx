@@ -12,6 +12,7 @@ export function QueuePanel() {
   const retryJob = useAppStore((s) => s.retryJob)
   const retryAllFailed = useAppStore((s) => s.retryAllFailed)
   const cancelJob = useAppStore((s) => s.cancelJob)
+  const cancelAllJobs = useAppStore((s) => s.cancelAllJobs)
   const removeJob = useAppStore((s) => s.removeJob)
   const clearCompletedJobs = useAppStore((s) => s.clearCompletedJobs)
 
@@ -63,6 +64,14 @@ export function QueuePanel() {
     return true
   })
 
+  const cancellableCount = queue.filter(
+    (q) =>
+      q.status === 'downloading' ||
+      q.status === 'uploading' ||
+      q.status === 'queued' ||
+      q.status === 'retrying' ||
+      q.status === 'waiting_language',
+  ).length
   const retryCount = queue.filter(
     (q) => q.status === 'retrying' || q.status === 'failed' || q.status === 'waiting_language' || q.status === 'cancelled',
   ).length
@@ -123,9 +132,14 @@ export function QueuePanel() {
         </div>
 
         <div className="flex flex-wrap items-center gap-[10px]">
+          {cancellableCount > 0 ? (
+            <Button variant="quiet" size="sm" onClick={() => void cancelAllJobs()}>
+              Alle abbrechen ({cancellableCount})
+            </Button>
+          ) : null}
           {retryCount > 0 ? (
             <Button variant="quiet" size="sm" onClick={() => void retryAllFailed()}>
-              Alle Fehlversuche jetzt wiederholen
+              Fehlversuche wiederholen
             </Button>
           ) : null}
           {completedCount > 0 ? (

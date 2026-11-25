@@ -903,9 +903,46 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
       store.patchQueueItem(jobId, { _cancelledByUser: true })
       ctrl.abort()
     } else {
-      store.patchQueueItem(jobId, { status: 'cancelled', nextRetryAt: null }, true)
+      store.patchQueueItem(jobId, { status: 'cancelled', nextRetryAt: null, error: 'Vom Benutzer abgebrochen' }, true)
     }
     return true
+  }
+
+  function cancelAllJobs() {
+    const queue = store.getQueue()
+    const cancellableStatuses = new Set(['downloading', 'uploading', 'queued', 'retrying', 'waiting_language'])
+    let count = 0
+    const now = Date.now()
+    const next = queue.map((j) => {
+      if (!cancellableStatuses.has(j.status)) return j
+      count += 1
+      j._cancelledByUser = true
+      const ctrl = activeControllers.get(j.id)
+      if (ctrl) {
+        try {
+          ctrl.abort()
+        } catch {}
+      }
+      return {
+        ...j,
+        _cancelledByUser: true,
+        status: 'cancelled',
+        speedBps: 0,
+        etaSeconds: null,
+        nextRetryAt: null,
+        error: 'Vom Benutzer abgebrochen',
+        updatedAt: now,
+      }
+    })
+    if (count > 0) {
+      store.setQueue(next, true)
+      store.addLog({
+        category: 'download',
+        title: 'Alle Downloads abgebrochen',
+        message: `${count} aktive oder wartende Aufträge wurden abgebrochen.`,
+      })
+    }
+    return count
   }
 
   function removeJob(jobId) {
@@ -926,6 +963,7 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
     retryJob,
     retryAllFailed,
     cancelJob,
+    cancelAllJobs,
     removeJob,
     clearCompletedJobs,
     getActiveCount: () => activeControllers.size,
