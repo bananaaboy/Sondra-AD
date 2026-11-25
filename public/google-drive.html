@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Sondra AD · Google Drive</title>
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --canvas: #f8faf8;
+        --ink: #0b4a22;
+        --prose: #111a14;
+        --panel: #e0f0e5;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --canvas: #0a110d;
+          --ink: #a6ecb9;
+          --prose: #e4ede6;
+          --panel: #142019;
+        }
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: var(--canvas);
+        color: var(--prose);
+        font: 16px/1.55 'Public Sans', system-ui, sans-serif;
+      }
+      main {
+        max-width: 34em;
+        margin: 24px;
+      }
+      h1 {
+        color: var(--ink);
+        font-size: 20px;
+        margin: 0 0 8px;
+      }
+      p {
+        margin: 0 0 12px;
+      }
+      code {
+        display: block;
+        padding: 12px;
+        border-radius: 10px;
+        background: var(--panel);
+        color: var(--ink);
+        font-family: monospace;
+        font-size: 13px;
+        word-break: break-all;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="title">Sondra AD · Google Drive</h1>
+      <p id="text">Verbindung wird abgeschlossen …</p>
+      <code id="payload" hidden></code>
+    </main>
+    <script>
+      ;(function () {
+        var rawHref = location.href
+        var fragment = new URLSearchParams(location.hash.replace(/^#/, ''))
+        var query = new URLSearchParams(location.search)
+        var answer = {
+          state: fragment.get('state') || query.get('state'),
+          access_token: fragment.get('access_token') || query.get('access_token'),
+          code: query.get('code') || fragment.get('code'),
+          expires_in: fragment.get('expires_in') || query.get('expires_in'),
+          scope: fragment.get('scope') || query.get('scope'),
+          error: fragment.get('error') || query.get('error'),
+        }
+        history.replaceState(null, '', location.pathname)
+        var text = document.getElementById('text')
+        var payload = document.getElementById('payload')
+        fetch('./api/ad/drive/callback', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(answer),
+        })
+          .then(function (res) {
+            return res.json()
+          })
+          .then(function (data) {
+            if ('BroadcastChannel' in window) {
+              var channel = new BroadcastChannel('sondra-ad-drive')
+              channel.postMessage(answer)
+              channel.close()
+            }
+            if (data && data.ok) {
+              text.textContent = 'Sondra AD ist mit Google Drive verbunden. Sie können dieses Fenster schließen.'
+              setTimeout(function () {
+                window.close()
+              }, 400)
+            } else {
+              text.textContent = 'Kopieren Sie diesen Rückgabewert in Sondra AD unter Einstellungen → Google Drive:'
+              payload.hidden = false
+              payload.textContent = rawHref
+            }
+          })
+          .catch(function () {
+            text.textContent = 'Kopieren Sie diesen Rückgabewert in Sondra AD auf Ihrem Server:'
+            payload.hidden = false
+            payload.textContent = rawHref
+          })
+      })()
+    </script>
+  </body>
+</html>

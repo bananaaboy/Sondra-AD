@@ -1,0 +1,51 @@
+SONDRA AD — DESKTOP-APP UND HINTERGRUND-DIENST FÜR WINDOWS
+Lizenz und Haftungsausschluss
+
+1. Lokaler Betrieb
+
+Sondra AD läuft vollständig auf Ihrem eigenen Rechner oder Server. Das Programm
+startet einen lokalen Dienst und zeigt die Oberfläche im eigenen Fenster oder
+im Browser. Ihre Dateien werden nicht an Sondra oder an die Herausgeberschaft
+von Sondra übertragen.
+
+Wenn Sie Google Drive verbinden, nutzt Sondra AD ausschließlich den Zugriff
+„drive.file“ für den Ordner „Sondra“ in Ihrem Google-Konto. Abrufe von
+Episoden und Aktualisierungen erfolgen direkt von Ihrem Rechner über Ihre
+eigene Internetverbindung. Es werden keine Nutzungsdaten, Absturzberichte
+oder Statistiken gesendet.
+
+2. Nutzungsrecht
+
+Sie dürfen diese App unentgeltlich installieren, verwenden, kopieren und
+weitergeben, sofern diese Datei und der Ordner „lizenzen“ unverändert
+beiliegen.
+
+3. Keine Gewähr
+
+DIE APP WIRD SO BEREITGESTELLT, WIE SIE IST, OHNE JEDE AUSDRÜCKLICHE
+ODER STILLSCHWEIGENDE GEWÄHR — INSBESONDERE OHNE GEWÄHR FÜR MARKTGÄNGIGKEIT,
+EIGNUNG FÜR EINEN BESTIMMTEN ZWECK, FEHLERFREIHEIT ODER UNUNTERBROCHENEN
+BETRIEB.
+
+4. Haftungsausschluss
+
+Soweit gesetzlich zulässig, haften die Herausgeberschaft und die Mitwirkenden
+von Sondra nicht für Schäden jeglicher Art, die aus der Nutzung oder der
+Unmöglichkeit der Nutzung dieser App entstehen, einschliesslich
+Datenverlust, entgangenem Gewinn und Ansprüchen Dritter.
+
+Nicht ausgeschlossen werden kann nach zwingendem Recht die Haftung für
+Vorsatz und grobe Fahrlässigkeit (Art. 100 OR) sowie, soweit anwendbar,
+nach dem Produktehaftpflichtgesetz.
+
+5. Ihre Verantwortung
+
+Sie allein entscheiden, welche Inhalte Sie auf Ihre Merkliste setzen und mit
+dieser App herunterladen, und Sie allein sind dafür verantwortlich, dass Sie
+dazu berechtigt sind. Die App umgeht keinen Kopierschutz (DRM).
+
+6. Bestandteile Dritter
+
+Die App enthält Software Dritter unter deren eigenen Lizenzen im Ordner
+„lizenzen“: Electron und Chromium (MIT und weitere), React, Zustand und
+qrcode-generator (MIT).

@@ -1,0 +1,891 @@
+import fs from 'node:fs'
+import path from 'node:path'
+import {
+  checkAniworldOnlineUpdates,
+  extractAniworldSeason,
+  extractPodcast,
+  isAniworldSeasonUrl,
+  isAniworldUrl,
+  isPodcastOrRssUrl,
+} from '../api/extractors.js'
+import {
+  archiveSeasonPath,
+  buildAniworldEpisodeUrl,
+  hintProperties,
+  isEpisodeWatched,
+  lastActivityAt,
+  seasonFolderName,
+  seasonPath,
+  seriesFolderName,
+} from '../shared/merklisteMerge.mjs'
+import { resolveBindIpv4 } from './mediaTools.mjs'
+
+export function createScheduler({ store, driveAuth, driveService, mediaTools, worker }) {
+  let checkRunning = false
+  let cleanupRunning = false
+  let archiveRunning = false
+  let tickTimer = null
+  let lastOnlineState = true
+
+  function shouldWatchSeries(item, cfg) {
+    const override = cfg.seriesOverrides?.[item.id]
+    if (override && typeof override.enabled === 'boolean') return override.enabled
+    if (!item.url) return false
+    const status = item.status || 'watching'
+    if (status === 'dropped') return false
+    return Array.isArray(cfg.watchStatuses) ? cfg.watchStatuses.includes(status) : status === 'watching'
+  }
+
+  function selectEpisodesForSeries(item, discoveredSeasons, cfg) {
+    const override = cfg.seriesOverrides?.[item.id] || {}
+    const backlogMode = override.backlogMode || cfg.backlogMode || 'from_current'
+    const lookahead =
+      typeof override.lookaheadLimit === 'number' ? override.lookaheadLimit : Number(cfg.lookaheadLimit) || 0
+
+    const prevOnline = item.onlineAvailable
+    const status = item.status || 'watching'
+    const curSeason = typeof item.season === 'number' ? item.season : 1
+    const curEpisode = typeof item.episode === 'number' && item.episode > 0 ? item.episode : 1
+
+    const candidates = []
+    const sortedSeasons = [...discoveredSeasons]
+      .filter((s) => s.number > 0 && typeof s.episodes === 'number' && s.episodes > 0)
+      .sort((a, b) => a.number - b.number)
+
+    for (const s of sortedSeasons) {
+      for (let ep = 1; ep <= s.episodes; ep += 1) {
+        if (isEpisodeWatched(item, s.number, ep)) continue
+        if (store.hasEpisode(item.id, s.number, ep)) continue
+
+        const isBrandNewOnline = prevOnline
+          ? s.number > prevOnline.maxSeason ||
+            (s.number === prevOnline.maxSeason && ep > prevOnline.maxEpisode)
+          : false
+
+        if (status === 'done') {
+          const knownSeason = (item.seasons || []).find((ks) => ks.number === s.number)
+          const beyondKnown =
+            !knownSeason ||
+            (typeof knownSeason.episodes === 'number' && ep > knownSeason.episodes) ||
+            isBrandNewOnline
+          if (!beyondKnown) continue
+        } else if (backlogMode === 'new_only') {
+          if (!prevOnline) continue
+          if (!isBrandNewOnline) continue
+        } else if (backlogMode === 'from_current') {
+          if (s.number < curSeason) continue
+          if (s.number === curSeason && ep < curEpisode) continue
+        }
+
+        candidates.push({ season: s.number, episode: ep })
+      }
+    }
+
+    if (lookahead > 0 && candidates.length > lookahead) {
+      return candidates.slice(0, lookahead)
+    }
+    return candidates
+  }
+
+  async function checkSingleSeries(item, cfg) {
+    const localAddress = resolveBindIpv4(cfg.bindAddress)
+    let queuedCount = 0
+
+    if (isAniworldUrl(item.url)) {
+      const online = await checkAniworldOnlineUpdates(item.url, {
+        fullMetadata: true,
+        localAddress,
+      })
+      if (!online || !Array.isArray(online.seasons)) return { checked: false, queued: 0 }
+
+      const existingSeasons = Array.isArray(item.seasons) ? [...item.seasons] : []
+      const mergedSeasons = [...existingSeasons]
+      let metadataChanged = false
+
+      for (const remoteSeason of online.seasons) {
+        if (typeof remoteSeason.number !== 'number' || !remoteSeason.episodes) continue
+        const idx = mergedSeasons.findIndex((s) => s.number === remoteSeason.number)
+        if (idx === -1) {
+          mergedSeasons.push({
+            number: remoteSeason.number,
+            episodes: remoteSeason.episodes,
+            watched: [],
+          })
+          metadataChanged = true
+        } else if (
+          mergedSeasons[idx].episodes === null ||
+          remoteSeason.episodes > mergedSeasons[idx].episodes
+        ) {
+          mergedSeasons[idx] = { ...mergedSeasons[idx], episodes: remoteSeason.episodes }
+          metadataChanged = true
+        }
+      }
+
+      const toDownload = selectEpisodesForSeries(item, online.seasons, cfg)
+
+      const updatedOnlineInfo = {
+        maxSeason: online.maxSeason,
+        maxEpisode: online.maxEpisode,
+        checkedAt: Date.now(),
+        hasNew: toDownload.length > 0,
+      }
+
+      const currentItems = store.getMerkItems()
+      const nextItems = currentItems.map((entry) => {
+        if (entry.id !== item.id) return entry
+        const reopenedStatus =
+          entry.status === 'done' && toDownload.length > 0 ? 'watching' : entry.status
+        return {
+          ...entry,
+          seasons: mergedSeasons,
+          onlineAvailable: updatedOnlineInfo,
+          status: reopenedStatus,
+          ...(online.coverUrl && !entry.cover ? { cover: online.coverUrl } : {}),
+          ...(metadataChanged ? { updatedAt: Date.now() } : {}),
+        }
+      })
+      store.saveMerkliste(nextItems)
+
+      for (const epInfo of toDownload) {
+        const epUrl = buildAniworldEpisodeUrl(item.url, epInfo.season, epInfo.episode)
+        if (!epUrl) continue
+        const enq = worker.enqueueJob({
+          url: epUrl,
+          title: `${item.title} - S${String(epInfo.season).padStart(2, '0')}E${String(epInfo.episode).padStart(2, '0')}`,
+          seriesId: item.id,
+          seriesTitle: item.title,
+          season: epInfo.season,
+          episode: epInfo.episode,
+          language: item.language !== 'auto' ? item.language : undefined,
+          mode: item.mode,
+          videoPref: item.videoPref !== 'untouched' ? item.videoPref : undefined,
+        })
+        if (enq.added) queuedCount += 1
+      }
+
+      return { checked: true, queued: queuedCount, metadataChanged }
+    }
+
+    if (isPodcastOrRssUrl(item.url)) {
+      const feed = await extractPodcast(item.url, { localAddress })
+      if (!feed || !Array.isArray(feed.items)) return { checked: false, queued: 0 }
+      const ordered = [...feed.items].reverse()
+      const discovered = [{ number: 1, episodes: ordered.length }]
+      const targets = selectEpisodesForSeries(item, discovered, cfg)
+      for (const t of targets) {
+        const entry = ordered[t.episode - 1]
+        if (!entry?.url) continue
+        const enq = worker.enqueueJob({
+          url: entry.url,
+          title: entry.title || `${item.title} - Folge ${t.episode}`,
+          seriesId: item.id,
+          seriesTitle: item.title,
+          season: 1,
+          episode: t.episode,
+          mode: item.mode || 'audio',
+        })
+        if (enq.added) queuedCount += 1
+      }
+      return { checked: true, queued: queuedCount, metadataChanged: false }
+    }
+
+    if (/[?&]list=|\/playlist\b|\/sets\//i.test(item.url)) {
+      const pl = await mediaTools.listPlaylistEntries(item.url)
+      if (!pl || !Array.isArray(pl.entries)) return { checked: false, queued: 0 }
+      const discovered = [{ number: item.season || 1, episodes: pl.entries.length }]
+      const targets = selectEpisodesForSeries(item, discovered, cfg)
+      for (const t of targets) {
+        const entry = pl.entries[t.episode - 1]
+        if (!entry?.url) continue
+        const enq = worker.enqueueJob({
+          url: entry.url,
+          title: entry.title || `${item.title} - Folge ${t.episode}`,
+          seriesId: item.id,
+          seriesTitle: item.title,
+          season: t.season,
+          episode: t.episode,
+          mode: item.mode,
+        })
+        if (enq.added) queuedCount += 1
+      }
+      return { checked: true, queued: queuedCount, metadataChanged: false }
+    }
+
+    const epNum = item.episode || 1
+    const sNum = item.season || 1
+    if (!isEpisodeWatched(item, sNum, epNum) && !store.hasEpisode(item.id, sNum, epNum)) {
+      const enq = worker.enqueueJob({
+        url: item.url,
+        title: item.title,
+        seriesId: item.id,
+        seriesTitle: item.title,
+        season: sNum,
+        episode: epNum,
+        mode: item.mode,
+      })
+      if (enq.added) queuedCount += 1
+    }
+    return { checked: true, queued: queuedCount, metadataChanged: false }
+  }
+
+  async function runCheckCycle({ reason = 'auto', seriesId = null } = {}) {
+    if (checkRunning) return { ok: false, busy: true }
+    checkRunning = true
+    store.events.emit('status', { checking: true })
+    try {
+      const cfg = store.getConfig()
+      if (driveAuth.isConnected()) {
+        await driveService.syncMerkliste().catch((err) => {
+          store.addLog({
+            category: 'sync',
+            level: 'warn',
+            title: 'Merklisten-Abgleich fehlgeschlagen',
+            message: String(err?.message ?? err),
+          })
+        })
+      }
+
+      const items = store.getMerkItems()
+      const targets = seriesId
+        ? items.filter((i) => i.id === seriesId && i.url)
+        : items.filter((i) => shouldWatchSeries(i, cfg))
+
+      let checkedSeries = 0
+      let totalQueued = 0
+      let merkChanged = false
+
+      for (let idx = 0; idx < targets.length; idx += 1) {
+        if (idx > 0 && !seriesId) {
+          await new Promise((r) => setTimeout(r, 800))
+        }
+        const current = store.getMerkItems().find((i) => i.id === targets[idx].id)
+        if (!current) continue
+        try {
+          const res = await checkSingleSeries(current, cfg)
+          if (res.checked) checkedSeries += 1
+          totalQueued += res.queued
+          if (res.metadataChanged) merkChanged = true
+        } catch (err) {
+          store.addLog({
+            category: 'sync',
+            level: 'warn',
+            title: `Prüfung fehlgeschlagen: ${current.title}`,
+            message: String(err?.message ?? err),
+            seriesId: current.id,
+            seriesTitle: current.title,
+          })
+        }
+      }
+
+      if (merkChanged && driveAuth.isConnected()) {
+        await driveService.pushMerkliste().catch(() => {})
+      }
+
+      const now = Date.now()
+      const nextCheckAt = now + Math.max(5, Number(cfg.checkIntervalMinutes) || 30) * 60_000
+      store.updateMerkMeta({ lastCheckAt: now, nextCheckAt })
+
+      if (totalQueued > 0 || reason === 'manual') {
+        store.addLog({
+          category: 'sync',
+          title: totalQueued > 0 ? `${totalQueued} neue Folge(n) eingereiht` : 'Merkliste geprüft — alles aktuell',
+          message: `${checkedSeries} Serie(n) überprüft${totalQueued > 0 ? `, ${totalQueued} Download(s) gestartet.` : '.'}`,
+        })
+      }
+
+      void worker.pumpQueue()
+      return { ok: true, checkedSeries, totalQueued }
+    } finally {
+      checkRunning = false
+      store.events.emit('status', { checking: false })
+    }
+  }
+
+  async function enqueueManualUrl({ url, language, mode, videoPref }) {
+    const cleanUrl = String(url || '').trim()
+    if (!/^https?:\/\//i.test(cleanUrl)) {
+      throw new Error('Bitte eine gültige http(s)-Adresse eingeben.')
+    }
+    const cfg = store.getConfig()
+    if (isAniworldSeasonUrl(cleanUrl)) {
+      const seasonInfo = await extractAniworldSeason(cleanUrl, {
+        localAddress: resolveBindIpv4(cfg.bindAddress),
+      })
+      if (seasonInfo && Array.isArray(seasonInfo.items) && seasonInfo.items.length > 0) {
+        let added = 0
+        for (const ep of seasonInfo.items) {
+          const res = worker.enqueueJob({
+            url: ep.url,
+            title: ep.title,
+            seriesTitle: seasonInfo.seriesTitle,
+            season: ep.seasonNumber,
+            episode: ep.episodeNumber,
+            language,
+            mode,
+            videoPref,
+          })
+          if (res.added) added += 1
+        }
+        return { count: added, playlistTitle: seasonInfo.title }
+      }
+    }
+    const res = worker.enqueueJob({
+      url: cleanUrl,
+      title: cleanUrl,
+      language,
+      mode,
+      videoPref,
+    })
+    return { count: res.added ? 1 : 0, job: res.job }
+  }
+
+  async function runStorageCleanup({ dryRun = false } = {}) {
+    if (cleanupRunning && !dryRun) return { ok: false, busy: true }
+    if (!dryRun) cleanupRunning = true
+    try {
+      const cfg = store.getConfig()
+      const storage = await driveService.inspectStorage()
+      const merkItems = store.getMerkItems()
+      const merkMap = new Map(merkItems.map((m) => [m.id, m]))
+
+      let neededDriveBytes = 0
+      if (storage.connected && storage.drive) {
+        const d = storage.drive
+        if (cfg.maxSondraDriveGb > 0) {
+          const maxBytes = cfg.maxSondraDriveGb * 1024 ** 3
+          const currentWithTrash = d.sondraTotalBytes + d.sondraTrashBytes
+          if (currentWithTrash > maxBytes) {
+            neededDriveBytes = Math.max(neededDriveBytes, currentWithTrash - maxBytes)
+          }
+        }
+        if (cfg.minFreeDriveGb > 0 && d.freeBytes !== null) {
+          const minFreeBytes = cfg.minFreeDriveGb * 1024 ** 3
+          if (d.freeBytes < minFreeBytes) {
+            neededDriveBytes = Math.max(neededDriveBytes, minFreeBytes - d.freeBytes)
+          }
+        }
+      }
+
+      let neededLocalBytes = 0
+      if (cfg.minFreeLocalGb > 0 && storage.local?.totalBytes > 0) {
+        const minFreeLocal = cfg.minFreeLocalGb * 1024 ** 3
+        if (storage.local.freeBytes < minFreeLocal) {
+          neededLocalBytes = minFreeLocal - storage.local.freeBytes
+        }
+      }
+
+      const drivePlan = []
+      if (neededDriveBytes > 0 && storage.drive) {
+        let acc = 0
+        if (cfg.emptyDriveTrashFirst && storage.drive.trashed.length > 0) {
+          for (const tf of storage.drive.trashed) {
+            if (acc >= neededDriveBytes) break
+            drivePlan.push({
+              target: 'drive',
+              reason: 'Papierkorb leeren',
+              id: tf.id,
+              name: tf.name,
+              path: `Papierkorb/${tf.name}`,
+              sizeBytes: tf.size,
+              hint: null,
+            })
+            acc += tf.size
+          }
+        }
+
+        const seriesFiles = storage.drive.files.filter((f) => f.path.startsWith('Serien/'))
+        if (acc < neededDriveBytes && cfg.deleteWatchedFirst) {
+          const watchedBySeries = new Map()
+          for (const f of seriesFiles) {
+            if (!f.hint) continue
+            const series = merkMap.get(f.hint.series)
+            if (!series || !isEpisodeWatched(series, f.hint.season, f.hint.episode)) continue
+            const list = watchedBySeries.get(series.id) || []
+            list.push(f)
+            watchedBySeries.set(series.id, list)
+          }
+
+          const deletableWatched = []
+          const keepCount = Math.max(0, Number(cfg.keepRecentWatchedCount) || 0)
+          for (const [, list] of watchedBySeries) {
+            list.sort((a, b) => (a.hint.season - b.hint.season) || (a.hint.episode - b.hint.episode))
+            const sliceEnd = keepCount > 0 ? Math.max(0, list.length - keepCount) : list.length
+            deletableWatched.push(...list.slice(0, sliceEnd))
+          }
+          deletableWatched.sort(
+            (a, b) => new Date(a.modifiedTime || 0).getTime() - new Date(b.modifiedTime || 0).getTime(),
+          )
+
+          for (const wf of deletableWatched) {
+            if (acc >= neededDriveBytes) break
+            drivePlan.push({
+              target: 'drive',
+              reason: 'Bereits gesehen',
+              id: wf.id,
+              name: wf.name,
+              path: wf.path,
+              sizeBytes: wf.size,
+              hint: wf.hint,
+            })
+            acc += wf.size
+          }
+        }
+
+        if (acc < neededDriveBytes && cfg.deleteArchivedWhenFull) {
+          const archivedFiles = storage.drive.files
+            .filter((f) => f.path.startsWith('Archiv/'))
+            .sort((a, b) => new Date(a.modifiedTime || 0).getTime() - new Date(b.modifiedTime || 0).getTime())
+          for (const af of archivedFiles) {
+            if (acc >= neededDriveBytes) break
+            drivePlan.push({
+              target: 'drive',
+              reason: 'Ältester Archiv-Eintrag',
+              id: af.id,
+              name: af.name,
+              path: af.path,
+              sizeBytes: af.size,
+              hint: af.hint,
+            })
+            acc += af.size
+          }
+        }
+
+        if (acc < neededDriveBytes && !cfg.protectUnwatched) {
+          const pickedIds = new Set(drivePlan.map((p) => p.id))
+          const remaining = seriesFiles
+            .filter((f) => !pickedIds.has(f.id))
+            .sort((a, b) => new Date(a.modifiedTime || 0).getTime() - new Date(b.modifiedTime || 0).getTime())
+          for (const uf of remaining) {
+            if (acc >= neededDriveBytes) break
+            drivePlan.push({
+              target: 'drive',
+              reason: 'Speicherlimit überschritten',
+              id: uf.id,
+              name: uf.name,
+              path: uf.path,
+              sizeBytes: uf.size,
+              hint: uf.hint,
+            })
+            acc += uf.size
+          }
+        }
+      }
+
+      const localPlan = []
+      if (neededLocalBytes > 0 && fs.existsSync(cfg.localDir)) {
+        const allLocal = []
+        const walk = (dir) => {
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const full = path.join(dir, entry.name)
+            if (entry.isDirectory()) walk(full)
+            else if (entry.isFile()) {
+              const st = fs.statSync(full)
+              allLocal.push({ full, name: entry.name, sizeBytes: st.size, mtimeMs: st.mtimeMs })
+            }
+          }
+        }
+        walk(cfg.localDir)
+        allLocal.sort((a, b) => a.mtimeMs - b.mtimeMs)
+        let localAcc = 0
+        for (const lf of allLocal) {
+          if (localAcc >= neededLocalBytes) break
+          localPlan.push({
+            target: 'local',
+            reason: 'Lokaler Mindest-Freispeicher',
+            id: lf.full,
+            name: lf.name,
+            path: lf.full,
+            sizeBytes: lf.sizeBytes,
+          })
+          localAcc += lf.sizeBytes
+        }
+      }
+
+      const candidates = [...drivePlan, ...localPlan]
+      const reclaimableBytes = candidates.reduce((s, c) => s + c.sizeBytes, 0)
+
+      if (dryRun) {
+        return {
+          ok: true,
+          dryRun: true,
+          neededDriveBytes,
+          neededLocalBytes,
+          reclaimableBytes,
+          candidates,
+        }
+      }
+
+      let deletedBytes = 0
+      let deletedCount = 0
+      for (const item of candidates) {
+        try {
+          if (item.target === 'drive') {
+            await driveService.deleteFilePermanently(item.id)
+            if (item.hint) {
+              store.unmarkEpisode(item.hint.series, item.hint.season, item.hint.episode)
+            }
+          } else if (item.target === 'local') {
+            fs.rmSync(item.path, { force: true })
+          }
+          deletedBytes += item.sizeBytes
+          deletedCount += 1
+        } catch (err) {
+          store.addLog({
+            category: 'storage',
+            level: 'warn',
+            title: `Löschen fehlgeschlagen: ${item.name}`,
+            message: String(err?.message ?? err),
+          })
+        }
+      }
+
+      if (deletedCount > 0) {
+        store.addLog({
+          category: 'storage',
+          title: `Speicher bereinigt: ${(deletedBytes / (1024 * 1024)).toFixed(1)} MB freigegeben`,
+          message: `${deletedCount} Datei(en) gemäß Speicherregel entfernt.`,
+        })
+      }
+
+      return {
+        ok: true,
+        dryRun: false,
+        neededDriveBytes,
+        neededLocalBytes,
+        deletedCount,
+        deletedBytes,
+        candidates,
+      }
+    } finally {
+      if (!dryRun) cleanupRunning = false
+    }
+  }
+
+  async function runInactivityCheck({ dryRun = false } = {}) {
+    if (archiveRunning && !dryRun) return { ok: false, busy: true }
+    if (!dryRun) archiveRunning = true
+    try {
+      const cfg = store.getConfig()
+      if (!driveAuth.isConnected()) return { ok: true, actions: [], processed: 0 }
+
+      const tree = await driveService.listSondraTree()
+      const merkItems = store.getMerkItems()
+      const merkMap = new Map(merkItems.map((m) => [m.id, m]))
+      const now = Date.now()
+      const thresholdMs = Math.max(1, Number(cfg.inactivityDays) || 45) * 86_400_000
+      const actionsSet = new Set(Array.isArray(cfg.inactivityActions) ? cfg.inactivityActions : ['drive_archive'])
+
+      const planned = []
+      const seriesFiles = tree.files.filter((f) => f.path.startsWith('Serien/'))
+
+      for (const file of seriesFiles) {
+        const series = file.hint ? merkMap.get(file.hint.series) : null
+        const seriesLastActive = series ? lastActivityAt(series) : 0
+        const fileModMs = file.modifiedTime ? new Date(file.modifiedTime).getTime() : 0
+        const referenceMs = Math.max(seriesLastActive, fileModMs)
+        if (!referenceMs || now - referenceMs < thresholdMs) continue
+
+        const inactiveDays = Math.floor((now - referenceMs) / 86_400_000)
+        planned.push({
+          kind: 'inactive_series_file',
+          file,
+          series,
+          inactiveDays,
+          operations: [...actionsSet],
+        })
+      }
+
+      if (cfg.archiveDeleteAfterDays > 0) {
+        const archiveExpiryMs = cfg.archiveDeleteAfterDays * 86_400_000
+        const archivedFiles = tree.files.filter((f) => f.path.startsWith('Archiv/'))
+        for (const af of archivedFiles) {
+          const modMs = af.modifiedTime ? new Date(af.modifiedTime).getTime() : 0
+          if (modMs > 0 && now - modMs >= archiveExpiryMs) {
+            planned.push({
+              kind: 'expired_archive_file',
+              file: af,
+              series: af.hint ? merkMap.get(af.hint.series) : null,
+              inactiveDays: Math.floor((now - modMs) / 86_400_000),
+              operations: ['delete_expired_archive'],
+            })
+          }
+        }
+      }
+
+      if (dryRun) {
+        return {
+          ok: true,
+          dryRun: true,
+          planned: planned.map((p) => ({
+            id: p.file.id,
+            name: p.file.name,
+            path: p.file.path,
+            sizeBytes: p.file.size,
+            seriesTitle: p.series?.title || null,
+            inactiveDays: p.inactiveDays,
+            operations: p.operations,
+          })),
+        }
+      }
+
+      let processed = 0
+      const pausedSeriesIds = new Set()
+
+      for (const item of planned) {
+        const f = item.file
+        const title = item.series?.title || f.path.split('/')[1] || 'Unbekannt'
+        const season = f.hint?.season ?? 1
+        const episode = f.hint?.episode ?? 1
+
+        try {
+          if (item.kind === 'expired_archive_file' || actionsSet.has('delete')) {
+            await driveService.deleteFilePermanently(f.id)
+            if (f.hint) store.unmarkEpisode(f.hint.series, season, episode)
+            processed += 1
+            continue
+          }
+
+          if (actionsSet.has('offload_local')) {
+            const destDir = path.join(cfg.localArchiveDir, seriesFolderName(title), seasonFolderName(season))
+            const destFile = path.join(destDir, f.name)
+            await driveService.downloadFileToLocal(f.id, destFile)
+            await driveService.deleteFilePermanently(f.id)
+            if (f.hint) {
+              store.markEpisodeArchived(f.hint.series, season, episode, {
+                driveFileId: null,
+                localArchivePath: destFile,
+                fileName: f.name,
+                sizeBytes: fs.statSync(destFile).size,
+              })
+            }
+            processed += 1
+          } else if (actionsSet.has('compress_archive') && mediaTools.findFfmpeg()) {
+            const workDir = path.join(cfg.tempDir, `arch-${Date.now()}`)
+            fs.mkdirSync(workDir, { recursive: true })
+            const rawPath = path.join(workDir, f.name)
+            const compName = f.name.replace(/\.[^.]+$/, '') + ' (Archiv).mp4'
+            const compPath = path.join(workDir, compName)
+            try {
+              await driveService.downloadFileToLocal(f.id, rawPath)
+              const compressed = await mediaTools.compressVideoForArchive({
+                inputFile: rawPath,
+                outputFile: compPath,
+                maxHeight: Number(cfg.archiveCompressHeight) || 720,
+                useGpu: cfg.useGpuEncoding,
+              })
+              const uploadSource = compressed ? compPath : rawPath
+              const uploadName = compressed ? compName : f.name
+              const targetSegs = archiveSeasonPath(title, season)
+              const uploaded = await driveService.uploadFileToDrive(targetSegs, uploadName, uploadSource, {
+                mime: 'video/mp4',
+                appProperties: f.hint ? hintProperties(f.hint) : undefined,
+              })
+              await driveService.deleteFilePermanently(f.id)
+              if (f.hint) {
+                store.markEpisodeArchived(f.hint.series, season, episode, {
+                  driveFileId: uploaded.id,
+                  drivePath: `${targetSegs.join('/')}/${uploadName}`,
+                  fileName: uploadName,
+                  sizeBytes: uploaded.size,
+                })
+              }
+              processed += 1
+            } finally {
+              fs.rmSync(workDir, { recursive: true, force: true })
+            }
+          } else if (actionsSet.has('drive_archive')) {
+            const targetSegs = archiveSeasonPath(title, season)
+            const moved = await driveService.moveDriveFile(
+              f.id,
+              targetSegs,
+              f.parents,
+              f.hint ? hintProperties(f.hint) : undefined,
+            )
+            if (f.hint) {
+              store.markEpisodeArchived(f.hint.series, season, episode, {
+                driveFileId: moved.id,
+                drivePath: `${targetSegs.join('/')}/${moved.name}`,
+                fileName: moved.name,
+                sizeBytes: moved.size,
+              })
+            }
+            processed += 1
+          }
+
+          if (actionsSet.has('pause_series') && item.series && !pausedSeriesIds.has(item.series.id)) {
+            pausedSeriesIds.add(item.series.id)
+          }
+        } catch (err) {
+          store.addLog({
+            category: 'archive',
+            level: 'warn',
+            title: `Archivierung fehlgeschlagen: ${f.name}`,
+            message: String(err?.message ?? err),
+          })
+        }
+      }
+
+      if (pausedSeriesIds.size > 0) {
+        const curCfg = store.getConfig()
+        const overrides = { ...(curCfg.seriesOverrides || {}) }
+        for (const sid of pausedSeriesIds) {
+          overrides[sid] = { ...(overrides[sid] || {}), enabled: false }
+        }
+        store.saveConfig({ seriesOverrides: overrides })
+      }
+
+      if (processed > 0 || pausedSeriesIds.size > 0) {
+        store.addLog({
+          category: 'archive',
+          title: `Inaktivitäts-Regel ausgeführt (${processed} Datei(en))`,
+          message: `${processed} lange ungenutzte Datei(en) verarbeitet${pausedSeriesIds.size > 0 ? `, ${pausedSeriesIds.size} Serie(n) pausiert` : ''}.`,
+        })
+      }
+
+      return { ok: true, dryRun: false, processed, pausedSeries: pausedSeriesIds.size }
+    } finally {
+      if (!dryRun) archiveRunning = false
+    }
+  }
+
+  async function restoreFromArchive({ driveFileId = null, localArchivePath = null, seriesId = null, season = 1, episode = 1, seriesTitle = 'Serie' }) {
+    const targetSegs = seasonPath(seriesTitle, season)
+    const props = seriesId ? hintProperties({ series: seriesId, season, episode }) : undefined
+
+    if (driveFileId) {
+      const tree = await driveService.listSondraTree()
+      const existing = tree.files.find((f) => f.id === driveFileId)
+      const moved = await driveService.moveDriveFile(driveFileId, targetSegs, existing?.parents || [], props)
+      if (seriesId) {
+        store.markEpisodeDownloaded(seriesId, season, episode, {
+          driveFileId: moved.id,
+          drivePath: `${targetSegs.join('/')}/${moved.name}`,
+          fileName: moved.name,
+          sizeBytes: moved.size,
+        })
+      }
+      store.addLog({
+        category: 'archive',
+        title: `Aus Archiv wiederhergestellt: ${moved.name}`,
+        message: `Zurückgelegt nach Sondra/${targetSegs.join('/')}.`,
+      })
+      return { ok: true, file: moved }
+    }
+
+    if (localArchivePath && fs.existsSync(localArchivePath) && driveAuth.isConnected()) {
+      const fileName = path.basename(localArchivePath)
+      const uploaded = await driveService.uploadFileToDrive(targetSegs, fileName, localArchivePath, {
+        mime: 'video/mp4',
+        appProperties: props,
+      })
+      fs.rmSync(localArchivePath, { force: true })
+      if (seriesId) {
+        store.markEpisodeDownloaded(seriesId, season, episode, {
+          driveFileId: uploaded.id,
+          drivePath: `${targetSegs.join('/')}/${fileName}`,
+          fileName,
+          sizeBytes: uploaded.size,
+        })
+      }
+      store.addLog({
+        category: 'archive',
+        title: `Aus lokalem Archiv nach Drive geladen: ${fileName}`,
+        message: `Wiederhergestellt unter Sondra/${targetSegs.join('/')}.`,
+      })
+      return { ok: true, file: uploaded }
+    }
+
+    throw new Error('Archiv-Datei wurde nicht gefunden.')
+  }
+
+  let lastSyncRun = 0
+  let lastCleanupRun = 0
+  let lastHeartbeatRun = 0
+
+  async function tick() {
+    const cfg = store.getConfig()
+    const now = Date.now()
+
+    await worker.pumpQueue()
+
+    if (!cfg.enabled) return
+
+    const syncEveryMs = Math.max(1, Number(cfg.merkSyncIntervalMinutes) || 5) * 60_000
+    if (driveAuth.isConnected() && now - lastSyncRun >= syncEveryMs) {
+      lastSyncRun = now
+      await driveService.syncMerkliste().catch(() => {})
+    }
+
+    if (driveAuth.isConnected() && now - lastHeartbeatRun >= 2 * 60_000) {
+      lastHeartbeatRun = now
+      await driveService.heartbeatDeviceRecord().catch(() => {})
+    }
+
+    const meta = store.getMerkMeta()
+    const checkEveryMs = Math.max(5, Number(cfg.checkIntervalMinutes) || 30) * 60_000
+    if (!meta.lastCheckAt || now - meta.lastCheckAt >= checkEveryMs) {
+      await runCheckCycle({ reason: 'scheduled' }).catch(() => {})
+    }
+
+    if (now - lastCleanupRun >= 15 * 60_000) {
+      lastCleanupRun = now
+      if (cfg.cleanupEnabled) {
+        await runStorageCleanup({ dryRun: false }).catch(() => {})
+      }
+      if (cfg.inactivityEnabled) {
+        await runInactivityCheck({ dryRun: false }).catch(() => {})
+      }
+    }
+
+    if (cfg.autoRetryOnNetworkRestore && driveAuth.isConnected()) {
+      const probeOk = await driveAuth
+        .getAccessToken(false)
+        .then(() => true)
+        .catch(() => false)
+      if (probeOk && !lastOnlineState) {
+        const retrying = store.getQueue().filter((j) => j.status === 'retrying')
+        for (const r of retrying) {
+          store.patchQueueItem(r.id, { status: 'queued', nextRetryAt: null })
+        }
+        if (retrying.length > 0) void worker.pumpQueue()
+      }
+      lastOnlineState = probeOk
+    }
+  }
+
+  function start() {
+    if (tickTimer) return
+    const meta = store.getMerkMeta()
+    if (!meta.nextCheckAt || meta.nextCheckAt < Date.now()) {
+      store.updateMerkMeta({
+        nextCheckAt: Date.now() + 15_000,
+      })
+    }
+    setTimeout(() => {
+      void tick()
+    }, 3_000).unref?.()
+
+    tickTimer = setInterval(() => {
+      void tick()
+    }, 15_000)
+    tickTimer.unref?.()
+  }
+
+  function stop() {
+    if (tickTimer) {
+      clearInterval(tickTimer)
+      tickTimer = null
+    }
+  }
+
+  return {
+    start,
+    stop,
+    isChecking: () => checkRunning,
+    runCheckCycle,
+    enqueueManualUrl,
+    runStorageCleanup,
+    runInactivityCheck,
+    restoreFromArchive,
+  }
+}

@@ -1,0 +1,9 @@
+Sondra AD — Automatischer Hintergrund-Downloader für Sondra
+
+Starten:
+- Installierte Fassung: über das Startmenü („Sondra AD“) oder automatisch beim Windows-Start im System-Tray.
+- Portable Fassung: Sondra-AD-Portable.exe direkt starten; alle Einstellungen und Protokolle liegen daneben im Ordner „Sondra-AD-Daten“.
+- Server-Modus ohne Fenster: `npm start` (oder `node desktop/headless.mjs --host 0.0.0.0 --port 47210`).
+
+Beenden:
+Rechtsklick auf das Symbol im Windows-Infobereich (System-Tray) → „Beenden“.

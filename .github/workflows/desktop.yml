@@ -1,0 +1,259 @@
+name: Desktop
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Setup als GitHub Release veröffentlichen'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: windows-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+            suffix: ''
+          - arch: arm64
+            runner: windows-11-arm
+            suffix: '-arm64'
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+      - run: npm ci
+      - run: npm ci --prefix desktop
+      - run: npm run typecheck
+      - run: npm run verify
+      - run: npm run build:desktop -- --${{ matrix.arch }}
+        env:
+          SONDRA_GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID || secrets.GOOGLE_CLIENT_ID }}
+          SONDRA_GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+
+      - name: Install silently and start the installed app
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem release -Filter 'Sondra-AD-Setup-*.exe' | Select-Object -First 1
+          if (-not $setup) { throw 'Kein Setup gebaut.' }
+          $installer = Start-Process -FilePath $setup.FullName -ArgumentList '/S' -Wait -PassThru
+          Write-Host "Setup beendet mit Code $($installer.ExitCode)"
+
+          $app = Join-Path $env:ProgramFiles 'Sondra AD\Sondra AD.exe'
+          if (-not (Test-Path $app)) {
+            throw "Nicht installiert: $app fehlt (Setup-Code $($installer.ExitCode))."
+          }
+
+          $bytes = [System.IO.File]::ReadAllBytes($app)
+          $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+          $machine = '{0:X4}' -f [BitConverter]::ToUInt16($bytes, $pe + 4)
+          $expected = if ('${{ matrix.arch }}' -eq 'arm64') { 'AA64' } else { '8664' }
+          if ($machine -ne $expected) { throw "Sondra AD.exe ist fuer Maschine $machine gebaut, erwartet $expected." }
+          Write-Host "Sondra AD.exe: ${{ matrix.arch }} ($machine)"
+          if (-not (Test-Path (Join-Path $env:ProgramFiles 'Sondra AD\LIZENZ.txt'))) { throw 'LIZENZ.txt fehlt im Installationsordner.' }
+
+          $entry = Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' |
+            Where-Object { $_.DisplayName -eq 'Sondra AD' }
+          if (-not $entry) { throw 'Kein Eintrag "Sondra AD" in Apps & Features (HKLM).' }
+          if ($entry.Publisher -ne 'Lizge') { throw "Herausgeber ist '$($entry.Publisher)', erwartet 'Lizge'." }
+          if (-not $entry.QuietUninstallString) { throw 'Keine stille Deinstallation eingetragen.' }
+          if (-not $entry.InstallLocation) { throw 'InstallLocation fehlt im Eintrag.' }
+          $entry | Select-Object DisplayName, Publisher, DisplayVersion, InstallLocation, QuietUninstallString | Format-List
+
+          $startMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'
+          if (-not (Test-Path (Join-Path $startMenu 'Sondra AD.lnk'))) { throw 'Kein Eintrag "Sondra AD" im Startmenue.' }
+
+          $report = Join-Path $env:RUNNER_TEMP 'smoke.json'
+          $env:SONDRA_SMOKE = $report
+          Start-Sleep -Seconds 3
+          Get-Process 'Sondra AD' -ErrorAction SilentlyContinue | Stop-Process -Force
+          foreach ($run in 1..2) {
+            Remove-Item $report -ErrorAction SilentlyContinue
+            $process = Start-Process -FilePath $app -PassThru
+            if (-not $process.WaitForExit(90000)) { $process.Kill(); throw "Start ${run}: Sondra AD hat sich nicht wieder beendet." }
+            if (-not (Test-Path $report)) { throw "Start ${run}: Sondra AD hat keinen Bericht geschrieben." }
+            $seen = Get-Content $report -Raw | ConvertFrom-Json
+            Write-Host "Start ${run}:"
+            $seen | Format-List
+            if ($seen.error) { throw "Start ${run} fehlgeschlagen: $($seen.error)" }
+            if (-not $seen.isolated) { throw "Start ${run}: Seite nicht isoliert." }
+            if ($seen.tabs -lt 6) { throw "Start ${run}: nur $($seen.tabs) Reiter sichtbar." }
+          }
+          Write-Host 'Installiert, gestartet, Sondra AD im eigenen Fenster geladen.'
+
+      - name: Start the portable build
+        shell: pwsh
+        run: |
+          $portable = Get-ChildItem release -Filter 'Sondra-AD-Portable-*.exe' | Select-Object -First 1
+          if (-not $portable) { throw 'Keine portable Fassung gebaut.' }
+          Write-Host "Portabel: $($portable.Name), $([math]::Round($portable.Length / 1MB)) MB"
+          $stick = Join-Path $env:RUNNER_TEMP 'stick'
+          New-Item -ItemType Directory -Force $stick | Out-Null
+          $exe = Join-Path $stick $portable.Name
+          Copy-Item $portable.FullName $exe
+          $report = Join-Path $env:RUNNER_TEMP 'portable.json'
+          $env:SONDRA_SMOKE = $report
+          Get-Process 'Sondra AD' -ErrorAction SilentlyContinue | Stop-Process -Force
+          foreach ($run in 1..2) {
+            Remove-Item $report -ErrorAction SilentlyContinue
+            $process = Start-Process -FilePath $exe -PassThru
+            if (-not $process.WaitForExit(180000)) { $process.Kill(); throw "Portabel, Start ${run}: hat sich nicht wieder beendet." }
+            if (-not (Test-Path $report)) { throw "Portabel, Start ${run}: kein Bericht geschrieben." }
+            $seen = Get-Content $report -Raw | ConvertFrom-Json
+            Write-Host "Portabel, Start ${run}:"
+            $seen | Format-List
+            if ($seen.error) { throw "Portabel, Start ${run} fehlgeschlagen: $($seen.error)" }
+            if (-not $seen.isolated) { throw "Portabel, Start ${run}: Seite nicht isoliert." }
+            if ($seen.tabs -lt 6) { throw "Portabel, Start ${run}: nur $($seen.tabs) Reiter sichtbar." }
+            $expected = Join-Path $stick 'Sondra-AD-Daten'
+            if ($seen.userData -ne $expected) { throw "Portabel: Daten in $($seen.userData), erwartet $expected." }
+            if ($seen.url -notlike '*:47211/*') { throw "Portabel: Seite auf $($seen.url), erwartet Port 47211." }
+          }
+          $log = Join-Path $stick 'Sondra-AD-Daten\sondra-ad.log'
+          Get-Content $log -Tail 6
+          if (-not (Select-String -Path $log -Pattern 'portabel' -Quiet)) { throw 'Das Log weiss nichts von der portablen Fassung.' }
+          Write-Host 'Portable Fassung gestartet, Daten neben der Datei.'
+
+      - name: Click through the installed app
+        shell: pwsh
+        run: |
+          Get-Process 'Sondra AD' -ErrorAction SilentlyContinue | Stop-Process -Force
+          node scripts/desktop-ui-test.mjs (Join-Path $env:ProgramFiles 'Sondra AD\Sondra AD.exe') ui-shots
+
+      - name: Show the app's log
+        if: always()
+        shell: pwsh
+        run: Get-Content (Join-Path $env:APPDATA 'Sondra AD\sondra-ad.log') -ErrorAction SilentlyContinue
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: Bildschirmfotos${{ matrix.suffix }}
+          path: ui-shots
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: Sondra-AD-Setup${{ matrix.suffix }}
+          path: |
+            release/Sondra-AD-Setup-*.exe
+            release/Sondra-AD-Setup-*.exe.blockmap
+            release/Sondra-AD-Portable-*.exe
+            release/latest.yml
+          retention-days: 30
+
+  release:
+    needs: [windows]
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: Sondra-AD-Setup
+          path: release
+      - uses: actions/download-artifact@v5
+        with:
+          name: Sondra-AD-Setup-arm64
+          path: release-arm64
+      - name: Publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tag = "v$version"
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne $tag) {
+            throw "Tag $env:GITHUB_REF_NAME passt nicht zur Version $version in package.json."
+          }
+          $existing = $null
+          $view = gh release view $tag --json isDraft,assets 2>$null
+          if ($LASTEXITCODE -eq 0) { $existing = $view | ConvertFrom-Json }
+          if ($existing -and -not $existing.isDraft) {
+            if (@($existing.assets.name) -contains 'latest.yml') {
+              Write-Host "Release $tag gibt es schon, bleibt unveraendert."
+              exit 0
+            }
+            gh release edit $tag --draft=true
+            if ($LASTEXITCODE -ne 0) { throw "$tag liess sich nicht zum Entwurf machen." }
+          }
+
+          $setup = Get-ChildItem release -Filter "Sondra-AD-Setup-$version.exe" | Select-Object -First 1
+          $armSetup = Get-ChildItem release-arm64 -Filter "Sondra-AD-Setup-arm64-$version.exe" | Select-Object -First 1
+          if (-not $setup -or -not $armSetup) { throw 'Ein Setup fehlt (x64 oder arm64).' }
+          Copy-Item $setup.FullName release/Sondra-AD-Setup.exe
+          Copy-Item $armSetup.FullName release/Sondra-AD-Setup-arm64.exe
+
+          $portable = Get-ChildItem release -Filter "Sondra-AD-Portable-$version.exe" | Select-Object -First 1
+          $armPortable = Get-ChildItem release-arm64 -Filter "Sondra-AD-Portable-arm64-$version.exe" | Select-Object -First 1
+          if (-not $portable -or -not $armPortable) { throw 'Eine portable Fassung fehlt (x64 oder arm64).' }
+          Copy-Item $portable.FullName release/Sondra-AD-Portable.exe
+          Copy-Item $armPortable.FullName release/Sondra-AD-Portable-arm64.exe
+
+          node scripts/merge-update-info.mjs release/latest.yml release-arm64/latest.yml release/latest.yml
+          if ($LASTEXITCODE -ne 0) { throw 'latest.yml nicht zusammengefuehrt.' }
+
+          $notes = @"
+          Sondra AD $version — Automatischer Hintergrund-Downloader fuer die Sondra-Merkliste (Windows & Server).
+
+          **Funktionen in $version**
+
+          - Unterbrechungsfreier Dauerbetrieb im Windows-System-Tray mit Windows-Autostart und Standby-Schutz sowie als kopfloser Server-Dienst
+          - Direkte Verbindung mit Sondra ueber Google Drive (``Sondra-Merkliste.sqlite``, ``Serien/<Titel>/Staffel <n>/`` und signierter Geraete-Eintrag) sowie 1-Klick-Uebernahme einer lokalen Sondra-Installation
+          - Automatische Erkennung neuer Staffeln und Episoden (einschliesslich Wiederaufnahme abgeschlossener Serien bei neuen Staffeln)
+          - Automatischer Hoster-Fallback (VOE, FileMoon, Vidmoly, Streamtape, Vidoza, Doodstream, yt-dlp), exponentielle Wiederholungen und Warteliste fuer die Wunschsprache
+          - Einstellbare Speicherbereinigung (Papierkorb und alte gesehene Episoden loeschen, Ungesehene schuetzen) sowie Inaktivitaets-Archivierung, Komprimierung und lokale Auslagerung
+
+          **Installieren:** ``Sondra-AD-Setup.exe`` herunterladen und ausfuehren — auf Windows-Rechnern mit Arm-Prozessor ``Sondra-AD-Setup-arm64.exe``. Stille Installation: ``Sondra-AD-Setup-$version.exe /S``
+
+          **Ohne Installation:** ``Sondra-AD-Portable.exe`` (Arm: ``Sondra-AD-Portable-arm64.exe``) startet ohne Setup; alle Daten liegen daneben im Ordner ``Sondra-AD-Daten``.
+          "@
+
+          $extra = @("$($setup.FullName).blockmap", "$($armSetup.FullName).blockmap") | Where-Object { Test-Path $_ }
+          if (-not (Test-Path 'release/latest.yml')) { throw 'latest.yml fehlt.' }
+
+          if (-not $existing) {
+            gh release create $tag --draft --target $env:GITHUB_SHA --title "Sondra AD $version" --notes $notes
+            if ($LASTEXITCODE -ne 0) { throw "Entwurf fuer $tag nicht angelegt." }
+          }
+          $files = @(
+            $setup.FullName,
+            'release/Sondra-AD-Setup.exe',
+            $armSetup.FullName,
+            'release/Sondra-AD-Setup-arm64.exe',
+            $portable.FullName,
+            'release/Sondra-AD-Portable.exe',
+            $armPortable.FullName,
+            'release/Sondra-AD-Portable-arm64.exe'
+          ) + $extra + @('release/latest.yml')
+
+          foreach ($file in $files) {
+            $done = $false
+            foreach ($try in 1..4) {
+              gh release upload $tag $file --clobber
+              if ($LASTEXITCODE -eq 0) { $done = $true; break }
+              Write-Host "Hochladen von $(Split-Path $file -Leaf) gescheitert (Versuch $try), gleich noch einmal."
+              Start-Sleep -Seconds (10 * $try)
+            }
+            if (-not $done) { throw "$(Split-Path $file -Leaf) liess sich nicht hochladen." }
+          }
+          gh release edit $tag --draft=false --title "Sondra AD $version" --notes $notes
+          if ($LASTEXITCODE -ne 0) { throw "$tag liess sich nicht veroeffentlichen." }
+          Write-Host "Release $tag mit $($files.Count) Dateien veroeffentlicht."

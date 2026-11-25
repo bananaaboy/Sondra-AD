@@ -1,0 +1,83 @@
+{
+  "name": "sondra-ad-desktop",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Sondra AD als Windows-App: Hintergrund-Betrieb im System-Tray, Autostart und lokaler Dienst.",
+  "author": "Lizge",
+  "devDependencies": {
+    "electron": "44.4.4",
+    "electron-builder": "26.15.3",
+    "electron-updater": "6.8.9"
+  },
+  "build": {
+    "appId": "ch.lizge.sondra.ad",
+    "productName": "Sondra AD",
+    "copyright": "© 2026 Lizge Navajeetharan",
+    "directories": {
+      "app": ".stage",
+      "buildResources": ".build",
+      "output": "../release"
+    },
+    "extraResources": [
+      {
+        "from": ".site",
+        "to": "site"
+      }
+    ],
+    "extraFiles": [
+      {
+        "from": ".build/LIZENZ.txt",
+        "to": "LIZENZ.txt"
+      },
+      {
+        "from": ".build/lizenzen",
+        "to": "lizenzen"
+      },
+      {
+        "from": "LIESMICH.txt",
+        "to": "LIESMICH.txt"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": ".build/icon.png",
+      "artifactName": "Sondra-AD-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowElevation": true,
+      "packElevateHelper": true,
+      "allowToChangeInstallationDirectory": true,
+      "license": ".build/LIZENZ.txt",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Sondra AD",
+      "uninstallDisplayName": "Sondra AD",
+      "installerLanguages": [
+        "de_DE"
+      ],
+      "language": "1031",
+      "deleteAppDataOnUninstall": false,
+      "include": "installer.nsh"
+    },
+    "linux": {
+      "target": "dir"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "bananaaboy",
+        "repo": "Sondra-AD",
+        "releaseType": "release"
+      }
+    ]
+  }
+}

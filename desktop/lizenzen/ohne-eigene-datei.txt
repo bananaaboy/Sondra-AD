@@ -1,0 +1,2 @@
+MIT License — Weitere enthaltene Bibliotheken unter MIT-Lizenz:
+qrcode-generator, youtubei.js, zustand, react, react-dom.
