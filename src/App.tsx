@@ -12,6 +12,57 @@ import { LogsPanel } from './components/panels/LogsPanel'
 import { SettingsPanel } from './components/panels/SettingsPanel'
 import { Button, Card, Field, Notice, TextInput } from './components/ui/primitives'
 
+function ShutdownBanner() {
+  const shutdownState = useAppStore((s) => s.shutdownState)
+  const cancelPendingShutdown = useAppStore((s) => s.cancelPendingShutdown)
+  const [now, setNow] = useState(() => Date.now())
+
+  const active = Boolean(shutdownState?.countdownEndsAt || shutdownState?.waitingForDownloads)
+
+  useEffect(() => {
+    if (!active) return
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [active])
+
+  if (!active || !shutdownState) return null
+
+  const label =
+    shutdownState.action === 'sleep'
+      ? 'Energiesparmodus'
+      : shutdownState.action === 'hibernate'
+        ? 'Ruhezustand'
+        : 'Herunterfahren'
+
+  const secLeft = shutdownState.countdownEndsAt
+    ? Math.max(0, Math.ceil((shutdownState.countdownEndsAt - now) / 1000))
+    : null
+
+  return (
+    <div className="mb-[20px]">
+      <Notice
+        tone="warn"
+        title={
+          shutdownState.waitingForDownloads
+            ? `Geplantes ${label} wartet auf laufende Downloads`
+            : `${label} in ${secLeft} Sekunden`
+        }
+      >
+        <div className="flex flex-wrap items-center justify-between gap-[12px]">
+          <p>
+            {shutdownState.waitingForDownloads
+              ? 'Sobald alle laufenden Downloads und Uploads fertig sind, startet ein 60-Sekunden-Countdown.'
+              : 'Klicke auf Abbrechen, damit der Rechner eingeschaltet bleibt.'}
+          </p>
+          <Button size="sm" variant="quiet" onClick={() => void cancelPendingShutdown()}>
+            {label} abbrechen
+          </Button>
+        </div>
+      </Notice>
+    </div>
+  )
+}
+
 export function App() {
   const { choice, setChoice } = useTheme()
   const surfaceMode = useAppStore((s) => s.surfaceMode)
@@ -52,6 +103,7 @@ export function App() {
       <Header themeChoice={choice} onThemeChange={setChoice} />
 
       <main className="shell flex-1 pt-[24px] sm:pt-[32px]">
+        <ShutdownBanner />
         {authRequired ? (
           <Card tone="mint" className="mx-auto max-w-[460px] p-[24px]">
             <form onSubmit={submitAccessToken} className="flex flex-col gap-[14px]">

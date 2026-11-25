@@ -75,6 +75,7 @@ export async function createEngineServer({
   onFocus = null,
   onAutostartChange = null,
   onConfigChange = null,
+  onPowerAction = undefined,
   fetchImpl = fetch,
 }) {
   const store = createStore(dataDir)
@@ -119,6 +120,8 @@ export async function createEngineServer({
     driveService,
     mediaTools,
     worker,
+    onNotify,
+    ...(onPowerAction ? { onPowerAction } : {}),
   })
 
   const sseClients = new Set()
@@ -193,6 +196,7 @@ export async function createEngineServer({
             runtimeMode,
             platform: process.platform,
             checking: scheduler.isChecking(),
+            shutdownState: scheduler.getShutdownState(),
             config: store.getConfig(),
             drive: driveAuth.getStatus(),
             tools,
@@ -211,10 +215,16 @@ export async function createEngineServer({
             await onAutostartChange?.(body.autostartWindows)
           }
           onConfigChange?.(updated)
+          const shutdownState = scheduler.recomputeShutdownSchedule()
           if (updated.enabled && !prev.enabled) {
             void worker.pumpQueue()
           }
-          return sendJson(res, 200, { ok: true, config: updated, drive: driveAuth.getStatus() })
+          return sendJson(res, 200, { ok: true, config: updated, drive: driveAuth.getStatus(), shutdownState })
+        }
+
+        if (route === 'power/cancel-shutdown' && req.method === 'POST') {
+          const shutdownState = scheduler.cancelPendingShutdown()
+          return sendJson(res, 200, { ok: true, shutdownState, config: store.getConfig() })
         }
 
         if (route === 'toggle' && req.method === 'POST') {

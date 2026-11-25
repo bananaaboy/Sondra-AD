@@ -8,6 +8,7 @@ import path from 'node:path'
 process.env.SONDRA_TEST_ALLOW_LOCAL = '1'
 
 import { createEngineServer } from '../engine/httpServer.mjs'
+import { computeNextShutdownAt } from '../engine/scheduler.mjs'
 import { decryptPairingBundle, encryptPairingBundle } from '../engine/driveAuth.mjs'
 import { checkRecord } from '../shared/deviceIdentity.mjs'
 import { mergeShared, normalizeMerkItem, readSharedMerkliste, sharedSqliteBytes } from '../shared/merklisteMerge.mjs'
@@ -503,12 +504,16 @@ async function main() {
   )
   fs.writeFileSync(path.join(fakeSondraDir, 'google-drive-schluessel.bin'), Buffer.from('plain:mock-sondra-refresh'))
 
+  const triggeredPowerActions = []
   const dataDir = path.join(workDir, 'ad-data')
   const engine = await createEngineServer({
     rootDir: path.resolve('dist'),
     dataDir,
     port: 0,
     runtimeMode: 'server',
+    onPowerAction: async (action) => {
+      triggeredPowerActions.push(action)
+    },
   })
 
   try {
@@ -708,6 +713,71 @@ async function main() {
     const cancelledCount = engine.worker.cancelAllJobs()
     assert.equal(cancelledCount, 1)
     assert.equal(engine.store.getQueue()[beforeQueueLen].status, 'cancelled')
+
+    console.log('10. Prüfe geplantes Herunterfahren (Wartezeit, Countdown, Abbruch & Auslösung) …')
+    const baseTime = new Date(2026, 4, 10, 22, 0, 0, 0).getTime()
+    const next03 = computeNextShutdownAt('03:00', baseTime)
+    assert.ok(next03 && next03 > baseTime)
+    assert.equal(new Date(next03).getHours(), 3)
+    assert.equal(new Date(next03).getMinutes(), 0)
+
+    engine.store.saveConfig({
+      scheduledShutdownEnabled: true,
+      scheduledShutdownTime: '03:00',
+      scheduledShutdownAction: 'shutdown',
+      scheduledShutdownWaitForDownloads: true,
+      scheduledShutdownRepeatDaily: false,
+    })
+    const schedState1 = engine.scheduler.recomputeShutdownSchedule()
+    assert.equal(schedState1.enabled, true)
+    assert.ok(schedState1.scheduledAt && schedState1.scheduledAt > Date.now())
+
+    const dummyId = 'shutdown-test-job'
+    engine.store.setQueue([
+      ...engine.store.getQueue(),
+      {
+        id: dummyId,
+        seriesId: 'frieren-id',
+        seriesTitle: 'Frieren',
+        seriesUrl: `${mock.baseUrl}/anime/stream/frieren`,
+        season: 1,
+        episode: 99,
+        langKey: 3,
+        langLabel: 'Ger-Sub',
+        episodeUrl: `${mock.baseUrl}/anime/stream/frieren/staffel-1/episode-1`,
+        status: 'downloading',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      },
+    ])
+
+    const waitState = await engine.scheduler.checkScheduledShutdown(schedState1.scheduledAt + 1000, 60_000)
+    assert.equal(waitState.waitingForDownloads, true)
+    assert.equal(waitState.countdownEndsAt, null)
+    assert.equal(triggeredPowerActions.length, 0)
+
+    engine.store.patchQueueItem(dummyId, { status: 'cancelled' }, true)
+    const countdownState = await engine.scheduler.checkScheduledShutdown(schedState1.scheduledAt + 2000, 60_000)
+    assert.equal(countdownState.waitingForDownloads, false)
+    assert.ok(countdownState.countdownEndsAt && countdownState.countdownEndsAt > schedState1.scheduledAt)
+
+    const cancelRes = await fetch(`${engine.url}api/ad/power/cancel-shutdown`, { method: 'POST' }).then((r) => r.json())
+    assert.equal(cancelRes.ok, true)
+    assert.equal(cancelRes.shutdownState.enabled, false)
+    assert.equal(cancelRes.shutdownState.countdownEndsAt, null)
+    assert.equal(triggeredPowerActions.length, 0)
+
+    engine.store.saveConfig({
+      scheduledShutdownEnabled: true,
+      scheduledShutdownTime: '03:00',
+      scheduledShutdownAction: 'shutdown',
+      scheduledShutdownWaitForDownloads: true,
+      scheduledShutdownRepeatDaily: false,
+    })
+    const schedState2 = engine.scheduler.recomputeShutdownSchedule()
+    await engine.scheduler.checkScheduledShutdown(schedState2.scheduledAt + 1000, 0)
+    assert.deepEqual(triggeredPowerActions, ['shutdown'])
+    assert.equal(engine.store.getConfig().scheduledShutdownEnabled, false)
 
     console.log('Alle Prüfungen erfolgreich bestanden.')
   } finally {

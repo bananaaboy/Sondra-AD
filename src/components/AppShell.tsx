@@ -223,7 +223,7 @@ export function Footer() {
           Sondra AD · Dauerbetrieb für Laptop und Server ({runtimeMode === 'desktop' ? 'Desktop-App mit System-Tray' : 'Hintergrund-Server'}).
         </p>
         <p className="value text-micro text-muted">
-          v1.0.3 · yt-dlp: {tools?.ytdlpAvailable ? tools.ytdlpVersion || 'bereit' : 'wird bei Bedarf geladen'} · FFmpeg:{' '}
+          v1.0.4 · yt-dlp: {tools?.ytdlpAvailable ? tools.ytdlpVersion || 'bereit' : 'wird bei Bedarf geladen'} · FFmpeg:{' '}
           {tools?.ffmpegAvailable ? (tools.gpuEncoder ? `GPU (${tools.gpuEncoder})` : 'System') : 'Nativ HLS'} ·{' '}
           {drive?.connected ? 'Google Drive verbunden' : 'Lokal'}
         </p>

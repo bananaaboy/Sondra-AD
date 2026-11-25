@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import {
@@ -20,7 +21,57 @@ import {
 } from '../shared/merklisteMerge.mjs'
 import { resolveBindIpv4 } from './mediaTools.mjs'
 
-export function createScheduler({ store, driveAuth, driveService, mediaTools, worker }) {
+export function computeNextShutdownAt(timeStr, nowMs = Date.now()) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(timeStr || '').trim())
+  if (!m) return null
+  const hour = Number(m[1])
+  const minute = Number(m[2])
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    return null
+  }
+  const d = new Date(nowMs)
+  d.setHours(hour, minute, 0, 0)
+  if (d.getTime() <= nowMs) {
+    d.setDate(d.getDate() + 1)
+  }
+  return d.getTime()
+}
+
+function defaultExecuteSystemPowerAction(action) {
+  if (process.platform === 'win32') {
+    if (action === 'hibernate') {
+      spawn('shutdown.exe', ['/h'], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
+      return
+    }
+    if (action === 'sleep') {
+      spawn('rundll32.exe', ['powrprof.dll,SetSuspendState', '0,1,0'], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      }).unref()
+      return
+    }
+    spawn('shutdown.exe', ['/s', '/t', '0'], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
+    return
+  }
+  if (process.platform === 'darwin') {
+    const cmd = action === 'sleep' ? 'tell application "System Events" to sleep' : 'tell application "System Events" to shut down'
+    spawn('osascript', ['-e', cmd], { detached: true, stdio: 'ignore' }).unref()
+    return
+  }
+  const verb = action === 'sleep' ? 'suspend' : action === 'hibernate' ? 'hibernate' : 'poweroff'
+  spawn('systemctl', [verb], { detached: true, stdio: 'ignore' }).unref()
+}
+
+export function createScheduler({
+  store,
+  driveAuth,
+  driveService,
+  mediaTools,
+  worker,
+  onNotify = null,
+  onPowerAction = defaultExecuteSystemPowerAction,
+}) {
   let checkRunning = false
   let cleanupRunning = false
   let archiveRunning = false
@@ -825,13 +876,184 @@ export function createScheduler({ store, driveAuth, driveService, mediaTools, wo
   let lastCleanupRun = 0
   let lastHeartbeatRun = 0
 
+  let scheduledShutdownAt = null
+  let shutdownWaitingForDownloads = false
+  let shutdownCountdownEndsAt = null
+  let shutdownTimer = null
+  let lastShutdownSignature = ''
+
+  function getShutdownState() {
+    const cfg = store.getConfig()
+    return {
+      enabled: Boolean(cfg.scheduledShutdownEnabled),
+      action: cfg.scheduledShutdownAction || 'shutdown',
+      scheduledAt: cfg.scheduledShutdownEnabled ? scheduledShutdownAt : null,
+      waitingForDownloads: shutdownWaitingForDownloads,
+      countdownEndsAt: shutdownCountdownEndsAt,
+    }
+  }
+
+  function emitShutdownState() {
+    store.events.emit('status', { shutdownState: getShutdownState() })
+  }
+
+  function clearShutdownTimer() {
+    if (shutdownTimer) {
+      clearTimeout(shutdownTimer)
+      shutdownTimer = null
+    }
+  }
+
+  function recomputeShutdownSchedule(nowMs = Date.now()) {
+    const cfg = store.getConfig()
+    const sig = `${Boolean(cfg.scheduledShutdownEnabled)}|${cfg.scheduledShutdownTime || ''}|${cfg.scheduledShutdownAction || 'shutdown'}`
+    if (!cfg.scheduledShutdownEnabled) {
+      clearShutdownTimer()
+      scheduledShutdownAt = null
+      shutdownWaitingForDownloads = false
+      shutdownCountdownEndsAt = null
+      lastShutdownSignature = sig
+      emitShutdownState()
+      return getShutdownState()
+    }
+    if (sig !== lastShutdownSignature || !scheduledShutdownAt) {
+      clearShutdownTimer()
+      shutdownWaitingForDownloads = false
+      shutdownCountdownEndsAt = null
+      scheduledShutdownAt = computeNextShutdownAt(cfg.scheduledShutdownTime, nowMs)
+      lastShutdownSignature = sig
+      emitShutdownState()
+    }
+    return getShutdownState()
+  }
+
+  function cancelPendingShutdown() {
+    clearShutdownTimer()
+    const cfg = store.getConfig()
+    shutdownWaitingForDownloads = false
+    shutdownCountdownEndsAt = null
+    if (cfg.scheduledShutdownEnabled) {
+      if (cfg.scheduledShutdownRepeatDaily) {
+        scheduledShutdownAt = computeNextShutdownAt(cfg.scheduledShutdownTime, Date.now() + 61_000)
+      } else {
+        store.saveConfig({ scheduledShutdownEnabled: false })
+        scheduledShutdownAt = null
+        lastShutdownSignature = `false|${cfg.scheduledShutdownTime || ''}|${cfg.scheduledShutdownAction || 'shutdown'}`
+      }
+    } else {
+      scheduledShutdownAt = null
+    }
+    store.addLog({
+      category: 'system',
+      title: 'Geplantes Herunterfahren abgebrochen',
+      message: 'Das Gerät bleibt eingeschaltet.',
+    })
+    emitShutdownState()
+    return getShutdownState()
+  }
+
+  function executeScheduledPowerNow() {
+    clearShutdownTimer()
+    const cfg = store.getConfig()
+    const action = cfg.scheduledShutdownAction || 'shutdown'
+    shutdownWaitingForDownloads = false
+    shutdownCountdownEndsAt = null
+    if (cfg.scheduledShutdownRepeatDaily) {
+      scheduledShutdownAt = computeNextShutdownAt(cfg.scheduledShutdownTime, Date.now() + 61_000)
+    } else {
+      store.saveConfig({ scheduledShutdownEnabled: false })
+      scheduledShutdownAt = null
+      lastShutdownSignature = `false|${cfg.scheduledShutdownTime || ''}|${action}`
+    }
+    const label =
+      action === 'sleep' ? 'Energiesparmodus' : action === 'hibernate' ? 'Ruhezustand' : 'Herunterfahren'
+    store.addLog({
+      category: 'system',
+      title: `Geplante Energie-Aktion ausgelöst: ${label}`,
+      message: `Ausgeführt um ${cfg.scheduledShutdownTime || 'geplanter Zeit'}.`,
+    })
+    emitShutdownState()
+    try {
+      onPowerAction(action)
+    } catch (err) {
+      store.addLog({
+        category: 'system',
+        level: 'error',
+        title: `${label} fehlgeschlagen`,
+        message: String(err?.message ?? err),
+      })
+    }
+  }
+
+  function checkScheduledShutdown(nowMs = Date.now(), countdownMs = 60_000) {
+    const cfg = store.getConfig()
+    if (!cfg.scheduledShutdownEnabled) return getShutdownState()
+    if (!scheduledShutdownAt) {
+      recomputeShutdownSchedule(nowMs)
+    }
+    if (!scheduledShutdownAt || nowMs < scheduledShutdownAt) return getShutdownState()
+    if (shutdownCountdownEndsAt) return getShutdownState()
+
+    const hasActiveTransfers =
+      worker.getActiveCount() > 0 ||
+      store.getQueue().some((j) => j.status === 'downloading' || j.status === 'uploading')
+
+    if (cfg.scheduledShutdownWaitForDownloads && hasActiveTransfers) {
+      if (!shutdownWaitingForDownloads) {
+        shutdownWaitingForDownloads = true
+        store.addLog({
+          category: 'system',
+          title: 'Herunterfahren wartet auf laufende Übertragungen',
+          message: 'Sobald alle aktiven Downloads und Uploads abgeschlossen sind, startet der 60-Sekunden-Countdown.',
+        })
+        emitShutdownState()
+      }
+      return getShutdownState()
+    }
+
+    shutdownWaitingForDownloads = false
+    const delay = Math.max(0, Number(countdownMs) || 0)
+    if (delay === 0) {
+      executeScheduledPowerNow()
+      return getShutdownState()
+    }
+
+    shutdownCountdownEndsAt = nowMs + delay
+    const action = cfg.scheduledShutdownAction || 'shutdown'
+    const label =
+      action === 'sleep' ? 'Energiesparmodus' : action === 'hibernate' ? 'Ruhezustand' : 'Herunterfahren'
+    store.addLog({
+      category: 'system',
+      title: `${label} in ${Math.round(delay / 1000)} Sekunden`,
+      message: 'Kann bis zum Ablauf jederzeit in Sondra AD abgebrochen werden.',
+    })
+    if (cfg.desktopNotifications && onNotify) {
+      try {
+        onNotify({
+          title: `Sondra AD: ${label} in ${Math.round(delay / 1000)} Sek.`,
+          body: 'Öffne Sondra AD, falls du den Vorgang abbrechen möchtest.',
+        })
+      } catch {}
+    }
+    emitShutdownState()
+    shutdownTimer = setTimeout(() => {
+      executeScheduledPowerNow()
+    }, delay)
+    shutdownTimer.unref?.()
+    return getShutdownState()
+  }
+
   async function tick() {
     const cfg = store.getConfig()
     const now = Date.now()
 
-    await worker.pumpQueue()
+    checkScheduledShutdown(now)
 
-    if (!cfg.enabled) return
+    if (!shutdownWaitingForDownloads && !shutdownCountdownEndsAt) {
+      await worker.pumpQueue()
+    }
+
+    if (!cfg.enabled || shutdownWaitingForDownloads || shutdownCountdownEndsAt) return
 
     const syncEveryMs = Math.max(1, Number(cfg.merkSyncIntervalMinutes) || 5) * 60_000
     if (driveAuth.isConnected() && now - lastSyncRun >= syncEveryMs) {
@@ -878,6 +1100,7 @@ export function createScheduler({ store, driveAuth, driveService, mediaTools, wo
 
   function start() {
     if (tickTimer) return
+    recomputeShutdownSchedule()
     const meta = store.getMerkMeta()
     if (!meta.nextCheckAt || meta.nextCheckAt < Date.now()) {
       store.updateMerkMeta({
@@ -895,6 +1118,7 @@ export function createScheduler({ store, driveAuth, driveService, mediaTools, wo
   }
 
   function stop() {
+    clearShutdownTimer()
     if (tickTimer) {
       clearInterval(tickTimer)
       tickTimer = null
@@ -905,6 +1129,10 @@ export function createScheduler({ store, driveAuth, driveService, mediaTools, wo
     start,
     stop,
     isChecking: () => checkRunning,
+    getShutdownState,
+    recomputeShutdownSchedule,
+    checkScheduledShutdown,
+    cancelPendingShutdown,
     runCheckCycle,
     enqueueManualUrl,
     runStorageCleanup,

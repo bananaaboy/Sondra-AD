@@ -8,6 +8,7 @@ import type {
   QueueJob,
   SavedLinkItem,
   SeriesOverride,
+  ShutdownState,
   StorageReport,
   ToolsStatusInfo,
 } from '../types'
@@ -95,6 +96,7 @@ export interface AppState {
   runtimeMode: 'desktop' | 'server'
   platform: string
   checking: boolean
+  shutdownState: ShutdownState | null
   errorBanner: string | null
 
   config: AdConfig | null
@@ -113,6 +115,7 @@ export interface AppState {
   refreshStorage: () => Promise<void>
   updateConfig: (patch: Partial<AdConfig>) => Promise<void>
   toggleEngine: (enabled?: boolean) => Promise<void>
+  cancelPendingShutdown: () => Promise<void>
   checkNow: (seriesId?: string) => Promise<{ checkedSeries: number; totalQueued: number }>
   syncMerkliste: () => Promise<void>
   upsertSeries: (item: Partial<SavedLinkItem> & { checkImmediately?: boolean }) => Promise<void>
@@ -139,6 +142,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   runtimeMode: 'server',
   platform: 'win32',
   checking: false,
+  shutdownState: null,
   errorBanner: null,
 
   config: null,
@@ -189,6 +193,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         runtimeMode: 'desktop' | 'server'
         platform: string
         checking: boolean
+        shutdownState?: ShutdownState | null
         config: AdConfig
         drive: DriveStatusInfo
         tools: ToolsStatusInfo
@@ -215,6 +220,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         runtimeMode: data.runtimeMode,
         platform: data.platform,
         checking: data.checking,
+        shutdownState: data.shutdownState ?? null,
         config: data.config,
         drive: data.drive,
         tools: data.tools,
@@ -250,8 +256,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   updateConfig: async (patch) => {
     const prevCfg = get().config
     if (prevCfg) set({ config: { ...prevCfg, ...patch } })
-    const res = await apiCall<{ config: AdConfig; drive: DriveStatusInfo }>('config', { body: patch })
-    set({ config: res.config, drive: res.drive })
+    const res = await apiCall<{ config: AdConfig; drive: DriveStatusInfo; shutdownState?: ShutdownState }>('config', {
+      body: patch,
+    })
+    set({
+      config: res.config,
+      drive: res.drive,
+      ...(res.shutdownState ? { shutdownState: res.shutdownState } : {}),
+    })
   },
 
   toggleEngine: async (enabled) => {
@@ -259,6 +271,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       body: typeof enabled === 'boolean' ? { enabled } : {},
     })
     set({ config: res.config })
+  },
+
+  cancelPendingShutdown: async () => {
+    const res = await apiCall<{ shutdownState: ShutdownState; config: AdConfig }>('power/cancel-shutdown', {
+      body: {},
+    })
+    set({ shutdownState: res.shutdownState, config: res.config })
   },
 
   checkNow: async (seriesId) => {
@@ -396,10 +415,11 @@ export function connectLiveEvents(): () => void {
 
     es.addEventListener('status', (ev) => {
       try {
-        const st = JSON.parse((ev as MessageEvent).data) as { checking?: boolean }
-        if (typeof st.checking === 'boolean') {
-          useAppStore.setState({ checking: st.checking })
-        }
+        const st = JSON.parse((ev as MessageEvent).data) as { checking?: boolean; shutdownState?: ShutdownState }
+        const patch: Partial<AppState> = {}
+        if (typeof st.checking === 'boolean') patch.checking = st.checking
+        if (st.shutdownState) patch.shutdownState = st.shutdownState
+        if (Object.keys(patch).length > 0) useAppStore.setState(patch)
       } catch {}
     })
 

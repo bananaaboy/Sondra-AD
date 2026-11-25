@@ -71,6 +71,12 @@ export function defaultConfig(dataDir) {
     notifyOnFailure: true,
     discordWebhookUrl: '',
     remoteAccessToken: '',
+
+    scheduledShutdownEnabled: false,
+    scheduledShutdownTime: '03:00',
+    scheduledShutdownAction: 'shutdown',
+    scheduledShutdownWaitForDownloads: true,
+    scheduledShutdownRepeatDaily: false,
   }
 }
 

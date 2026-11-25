@@ -135,6 +135,22 @@ export interface AdConfig {
   notifyOnFailure: boolean
   discordWebhookUrl: string
   remoteAccessToken: string
+
+  scheduledShutdownEnabled: boolean
+  scheduledShutdownTime: string
+  scheduledShutdownAction: ShutdownAction
+  scheduledShutdownWaitForDownloads: boolean
+  scheduledShutdownRepeatDaily: boolean
+}
+
+export type ShutdownAction = 'shutdown' | 'sleep' | 'hibernate'
+
+export interface ShutdownState {
+  enabled: boolean
+  action: ShutdownAction
+  scheduledAt: number | null
+  waitingForDownloads: boolean
+  countdownEndsAt: number | null
 }
 
 export interface DriveStatusInfo {

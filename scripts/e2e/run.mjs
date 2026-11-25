@@ -288,6 +288,7 @@ async function runE2E() {
     await page.waitForSelector('text=Bevorzugte Sprache')
     await page.click('[data-settings-tab="betrieb"]')
     await page.waitForSelector('text=Prüfintervall')
+    await page.waitForSelector('text=Geplantes Herunterfahren')
     await page.click('[data-settings-tab="erweitert"]')
     await page.waitForSelector('text=Hoster-Reihenfolge')
 

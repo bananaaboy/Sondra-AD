@@ -7,6 +7,7 @@ import type {
   BacklogMode,
   DriveStatusInfo,
   SavedLinkStatus,
+  ShutdownAction,
   StorageTarget,
   ToolsStatusInfo,
   VideoFilePref,
@@ -27,6 +28,7 @@ export function SettingsPanel() {
   const drive = useAppStore((s) => s.drive)
   const tools = useAppStore((s) => s.tools)
   const runtimeMode = useAppStore((s) => s.runtimeMode)
+  const shutdownState = useAppStore((s) => s.shutdownState)
 
   const updateConfig = useAppStore((s) => s.updateConfig)
   const bootstrap = useAppStore((s) => s.bootstrap)
@@ -572,6 +574,65 @@ export function SettingsPanel() {
                 onChange={(e) => void updateConfig({ maxBandwidthKbps: Math.max(0, Number(e.target.value) || 0) })}
               />
             </Field>
+          </div>
+
+          <div className="flex flex-col gap-[14px] border-t border-line pt-[18px]">
+            <SectionHead rule={false}>Geplantes Herunterfahren</SectionHead>
+            <Toggle
+              label="Gerät zu einer bestimmten Uhrzeit automatisch herunterfahren"
+              hint="Startet zur gewählten Uhrzeit einen 60-Sekunden-Countdown, der jederzeit abgebrochen werden kann."
+              checked={Boolean(config.scheduledShutdownEnabled)}
+              onChange={(val) => void updateConfig({ scheduledShutdownEnabled: val })}
+            />
+            {config.scheduledShutdownEnabled ? (
+              <div className="flex flex-col gap-[14px] pt-[2px]">
+                <div className="grid grid-cols-1 gap-[14px] sm:grid-cols-2">
+                  <Field label="Uhrzeit">
+                    <TextInput
+                      type="time"
+                      value={config.scheduledShutdownTime || '03:00'}
+                      onChange={(e) => void updateConfig({ scheduledShutdownTime: e.target.value || '03:00' })}
+                    />
+                  </Field>
+                  <Field label="Aktion">
+                    <Select
+                      value={config.scheduledShutdownAction || 'shutdown'}
+                      onChange={(e) => void updateConfig({ scheduledShutdownAction: e.target.value as ShutdownAction })}
+                    >
+                      <option value="shutdown">Herunterfahren</option>
+                      <option value="sleep">Energiesparmodus</option>
+                      <option value="hibernate">Ruhezustand</option>
+                    </Select>
+                  </Field>
+                </div>
+                <div className="grid grid-cols-1 gap-[12px] sm:grid-cols-2">
+                  <Toggle
+                    label="Laufende Downloads & Uploads erst fertigstellen"
+                    checked={Boolean(config.scheduledShutdownWaitForDownloads)}
+                    onChange={(val) => void updateConfig({ scheduledShutdownWaitForDownloads: val })}
+                  />
+                  <Toggle
+                    label="Jeden Tag wiederholen"
+                    checked={Boolean(config.scheduledShutdownRepeatDaily)}
+                    onChange={(val) => void updateConfig({ scheduledShutdownRepeatDaily: val })}
+                  />
+                </div>
+                {shutdownState?.scheduledAt ? (
+                  <p className="text-micro text-muted">
+                    Nächster geplanter Zeitpunkt:{' '}
+                    <span className="value text-ink">
+                      {new Date(shutdownState.scheduledAt).toLocaleString('de-DE', {
+                        weekday: 'short',
+                        day: '2-digit',
+                        month: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </span>
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
           </div>
 
           <div className="flex flex-col gap-[14px] border-t border-line pt-[18px]">
