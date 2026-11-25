@@ -73,7 +73,21 @@ export function panelFromHash(hash: string): PanelId {
   return 'uebersicht'
 }
 
+import { IN_ELECTRON_APP } from '../lib/downloads'
+
+export type SurfaceMode = 'loading' | 'app' | 'website'
+
+function initialSurfaceMode(): SurfaceMode {
+  if (typeof window === 'undefined') return 'loading'
+  if (import.meta.env.VITE_WEBSITE_ONLY === 'true') return 'website'
+  const params = new URLSearchParams(window.location.search)
+  if (params.get('web') === '1') return 'website'
+  if (IN_ELECTRON_APP) return 'app'
+  return 'loading'
+}
+
 export interface AppState {
+  surfaceMode: SurfaceMode
   panel: PanelId
   enterDirection: number
   ready: boolean
@@ -116,6 +130,7 @@ export interface AppState {
 const PANEL_ORDER: PanelId[] = ['uebersicht', 'merkliste', 'warteschlange', 'speicher', 'protokoll', 'einstellungen']
 
 export const useAppStore = create<AppState>((set, get) => ({
+  surfaceMode: initialSurfaceMode(),
   panel: typeof window !== 'undefined' ? panelFromHash(window.location.hash) : 'uebersicht',
   enterDirection: 0,
   ready: false,
@@ -149,8 +164,27 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   bootstrap: async () => {
+    if (get().surfaceMode === 'website') return
     try {
-      const data = await apiCall<{
+      const token = getStoredToken()
+      const headers: Record<string, string> = {}
+      if (token) headers.Authorization = `Bearer ${token}`
+      const res = await fetch('./api/ad/bootstrap', { headers })
+      if (res.status === 401) {
+        set({ surfaceMode: 'app', authRequired: true, errorBanner: null })
+        return
+      }
+      const ct = res.headers.get('content-type') || ''
+      if (!res.ok || !ct.includes('application/json')) {
+        if (IN_ELECTRON_APP) {
+          set({ surfaceMode: 'app', errorBanner: `Lokaler Dienst antwortete unerwartet (${res.status}).` })
+        } else {
+          set({ surfaceMode: 'website', errorBanner: null })
+        }
+        return
+      }
+      const data = (await res.json()) as {
+        ok?: boolean
         runtimeMode: 'desktop' | 'server'
         platform: string
         checking: boolean
@@ -162,9 +196,18 @@ export const useAppStore = create<AppState>((set, get) => ({
         queue: QueueJob[]
         episodeIndex: { downloaded: Record<string, EpisodeRecord>; archived: Record<string, EpisodeRecord> }
         logs: LogRecord[]
-      }>('bootstrap')
+      }
+      if (!data || typeof data !== 'object' || !data.config) {
+        if (IN_ELECTRON_APP) {
+          set({ surfaceMode: 'app', errorBanner: 'Ungültige Antwort vom lokalen Dienst.' })
+        } else {
+          set({ surfaceMode: 'website', errorBanner: null })
+        }
+        return
+      }
 
       set({
+        surfaceMode: 'app',
         ready: true,
         authRequired: false,
         errorBanner: null,
@@ -182,7 +225,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
       void get().refreshStorage()
     } catch (err) {
-      set({ errorBanner: err instanceof Error ? err.message : String(err) })
+      if (IN_ELECTRON_APP) {
+        set({ surfaceMode: 'app', errorBanner: err instanceof Error ? err.message : String(err) })
+      } else {
+        set({ surfaceMode: 'website', errorBanner: null })
+      }
     }
   },
 

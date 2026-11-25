@@ -243,6 +243,11 @@ async function runE2E() {
     const tabCount = await page.locator('[data-tab]').count()
     assert.equal(tabCount, 6)
 
+    const driveBtnDots = await page.locator('header button:has-text("Drive") span.rounded-pill').count()
+    assert.equal(driveBtnDots, 0)
+    const headerStatusPills = await page.locator('header button:has-text("Aktiv"), header button:has-text("Pausiert")').count()
+    assert.equal(headerStatusPills, 0)
+
     await page.click('[data-tab][data-panel="merkliste"]')
     await page.waitForSelector('h2:has-text("Merkliste")')
 
@@ -276,8 +281,34 @@ async function runE2E() {
     await page.click('header button[aria-label^="Erscheinungsbild"]')
     await page.waitForTimeout(200)
 
+    const webPage = await browser.newPage({ viewport: { width: 1366, height: 860 } })
+    webPage.on('pageerror', (err) => pageErrors.push(err.message))
+    webPage.on('console', (msg) => {
+      if (msg.type() === 'error') pageErrors.push(msg.text())
+    })
+
+    await webPage.goto(`${engine.url}?web=1`, { waitUntil: 'networkidle' })
+    await webPage.waitForSelector('h2:has-text("Sondra AD für Windows")')
+    assert.equal(await webPage.locator('[data-site-tab]').count(), 4)
+    await webPage.waitForSelector('text=Microsoft Store')
+    await webPage.waitForSelector('text=Setup für Windows (.exe)')
+
+    await webPage.click('a:has-text("Setup herunterladen")')
+    await webPage.waitForSelector('dialog h3:has-text("Warum Windows warnt")')
+    await webPage.click('dialog button:has-text("Abbrechen")')
+
+    await webPage.click('[data-site-tab][data-panel="datenschutz"]')
+    await webPage.waitForSelector('h2:has-text("Datenschutz")')
+
+    await webPage.click('[data-site-tab][data-panel="lizenzen"]')
+    await webPage.waitForSelector('h2:has-text("Lizenzen & Quellcode")')
+
+    await webPage.click('[data-site-tab][data-panel="einrichtung"]')
+    await webPage.waitForSelector('h2:has-text("Einrichtung & Hilfe")')
+    await webPage.close()
+
     assert.deepEqual(pageErrors, [])
-    console.log('Browser-E2E erfolgreich abgeschlossen (6 Reiter, Live-SSE, Auto-Download in Drive, Speicher-Vorschau, Protokoll, Thema).')
+    console.log('Browser-E2E erfolgreich abgeschlossen (App-Modus ohne Drive-Indikator + Website mit Downloads, Store, Datenschutz & Lizenzen).')
   } finally {
     await browser?.close()
     await engine.close()

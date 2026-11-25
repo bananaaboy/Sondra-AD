@@ -3,6 +3,7 @@ import type { CSSProperties } from 'react'
 import { useTheme } from './hooks/useTheme'
 import { connectLiveEvents, setStoredToken, useAppStore } from './state/appStore'
 import { Footer, Header } from './components/AppShell'
+import { WebsiteView } from './components/WebsiteView'
 import { OverviewPanel } from './components/panels/OverviewPanel'
 import { WatchlistPanel } from './components/panels/WatchlistPanel'
 import { QueuePanel } from './components/panels/QueuePanel'
@@ -13,6 +14,7 @@ import { Button, Card, Field, Notice, TextInput } from './components/ui/primitiv
 
 export function App() {
   const { choice, setChoice } = useTheme()
+  const surfaceMode = useAppStore((s) => s.surfaceMode)
   const panel = useAppStore((s) => s.panel)
   const enterDirection = useAppStore((s) => s.enterDirection)
   const ready = useAppStore((s) => s.ready)
@@ -24,13 +26,25 @@ export function App() {
 
   useEffect(() => {
     void bootstrap()
-    return connectLiveEvents()
   }, [bootstrap])
+
+  useEffect(() => {
+    if (surfaceMode !== 'app' || !ready) return
+    return connectLiveEvents()
+  }, [surfaceMode, ready])
 
   const submitAccessToken = (e: React.FormEvent) => {
     e.preventDefault()
     setStoredToken(tokenInput.trim())
     void bootstrap()
+  }
+
+  if (surfaceMode === 'website') {
+    return <WebsiteView themeChoice={choice} onThemeChange={setChoice} />
+  }
+
+  if (surfaceMode === 'loading') {
+    return <div className="min-h-screen bg-canvas" />
   }
 
   return (

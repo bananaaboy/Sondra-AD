@@ -17,13 +17,34 @@ export function SondraMark({ className = 'h-[26px] w-[26px]' }: { className?: st
   )
 }
 
-export function Logo() {
+export function DriveIcon({ className = 'h-4 w-4' }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 16 16" className={`shrink-0 ${className}`} fill="none" aria-hidden>
+      <path
+        d="M4.6 12.6H4a3 3 0 01-.4-6 4.2 4.2 0 018.1-.9 3.2 3.2 0 01.3 6.4h-.6"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M8 13.6V8.4M5.9 10.3L8 8.2l2.1 2.1"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+export function Logo({ onClick }: { onClick?: () => void }) {
   const setPanel = useAppStore((s) => s.setPanel)
   return (
     <h1 className="m-0 flex items-center gap-[8px] text-ink">
       <button
         type="button"
-        onClick={() => setPanel('uebersicht')}
+        onClick={() => (onClick ? onClick() : setPanel('uebersicht'))}
         className="press flex items-center gap-[8px] rounded-nav text-ink"
       >
         <SondraMark />
@@ -81,8 +102,7 @@ export function PanelTabs() {
       <div ref={listRef} data-tabrow className="relative flex min-w-max items-end">
         {PANELS.map((entry, idx) => {
           const active = entry.id === panel
-          const count =
-            entry.id === 'warteschlange' ? activeJobs + problemJobs : 0
+          const count = entry.id === 'warteschlange' ? activeJobs + problemJobs : 0
           return (
             <button
               key={entry.id}
@@ -127,14 +147,11 @@ export function Header({
   themeChoice: ThemeChoice
   onThemeChange: (choice: ThemeChoice) => void
 }) {
-  const config = useAppStore((s) => s.config)
   const drive = useAppStore((s) => s.drive)
   const checking = useAppStore((s) => s.checking)
   const checkNow = useAppStore((s) => s.checkNow)
-  const toggleEngine = useAppStore((s) => s.toggleEngine)
   const setPanel = useAppStore((s) => s.setPanel)
 
-  const enabled = Boolean(config?.enabled)
   const driveConnected = Boolean(drive?.connected)
 
   return (
@@ -148,34 +165,12 @@ export function Header({
             title={
               driveConnected
                 ? `Google Drive verbunden${drive?.account?.email ? ` (${drive.account.email})` : ''}`
-                : 'Google Drive verbinden'
+                : 'Bei Google anmelden, um mit Sondra zu synchronisieren'
             }
-            className={`press flex items-center gap-[6px] rounded-nav px-[10px] py-[6px] text-small font-medium ${
-              driveConnected
-                ? 'bg-panel-soft text-ink'
-                : 'bg-raised text-prose ring-1 ring-inset ring-line hover:text-ink'
-            }`}
+            className="press flex shrink-0 items-center gap-[8px] rounded-nav px-[8px] py-[8px] text-small text-ink ring-1 ring-inset ring-rule hover:bg-panel-soft sm:px-[12px]"
           >
-            <span
-              className={`size-[7px] rounded-pill ${
-                driveConnected ? 'bg-ink' : 'bg-faint'
-              }`}
-            />
-            <span className="hidden sm:inline">Drive</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => void toggleEngine()}
-            title={enabled ? 'Auto-Download ist aktiv (Klicken zum Pausieren)' : 'Auto-Download ist pausiert (Klicken zum Fortsetzen)'}
-            className={`press flex items-center gap-[6px] rounded-nav px-[10px] py-[6px] text-small font-medium ${
-              enabled
-                ? 'bg-panel-soft text-ink'
-                : 'bg-raised text-muted ring-1 ring-inset ring-line hover:text-ink'
-            }`}
-          >
-            <span className={`size-[7px] rounded-pill ${enabled ? 'pulse-dot bg-ink' : 'bg-faint'}`} />
-            <span className="hidden md:inline">{enabled ? 'Aktiv' : 'Pausiert'}</span>
+            <DriveIcon />
+            <span className="sr-only sm:not-sr-only">{driveConnected ? 'Drive' : 'Drive anmelden'}</span>
           </button>
 
           <Button
@@ -238,7 +233,7 @@ export function Footer() {
           Datenschutz
         </a>
         <a className="text-ink underline underline-offset-[3px] hover:no-underline" href="./lizenz.html">
-          Lizenz
+          Lizenzen
         </a>
       </p>
     </footer>

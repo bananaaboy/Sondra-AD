@@ -12,6 +12,7 @@ import { decryptPairingBundle, encryptPairingBundle } from '../engine/driveAuth.
 import { checkRecord } from '../shared/deviceIdentity.mjs'
 import { mergeShared, normalizeMerkItem, readSharedMerkliste, sharedSqliteBytes } from '../shared/merklisteMerge.mjs'
 import { buildTrayIconPng } from '../desktop/trayIcon.mjs'
+import { makeStoreTiles } from './store-tiles.mjs'
 
 function startMockEcosystem() {
   const driveFiles = new Map()
@@ -447,9 +448,15 @@ async function waitUntil(predicate, timeoutMs = 15_000) {
 }
 
 async function main() {
-  console.log('1. Prüfe Tray-PNG-Generator und SQLite-Merkliste …')
+  console.log('1. Prüfe Tray-PNG-Generator, Store-Kacheln und SQLite-Merkliste …')
   const png = buildTrayIconPng(32, true)
   assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a')
+  const tileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sondra-ad-tiles-'))
+  makeStoreTiles('public/icon-512.png', tileDir)
+  assert.equal(fs.existsSync(path.join(tileDir, 'StoreLogo.png')), true)
+  assert.equal(fs.existsSync(path.join(tileDir, 'Wide310x150Logo.png')), true)
+  assert.equal(fs.existsSync(path.join(tileDir, 'Square44x44Logo.targetsize-256_altform-unplated.png')), true)
+  fs.rmSync(tileDir, { recursive: true, force: true })
 
   const itemA = normalizeMerkItem({
     id: 'merk-1',

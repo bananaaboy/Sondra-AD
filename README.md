@@ -44,16 +44,23 @@ Unter **Speicher & Archiv** lässt sich genau festlegen, ab wann Sondra AD Platz
 - **Lösch-Reihenfolge:** Zuerst wird der Papierkorb geleert, danach werden bereits als `gesehen` markierte Episoden ab der ältesten gelöscht (wobei pro Serie eine einstellbare Anzahl zuletzt gesehener Folgen erhalten bleibt). Ungesehene Episoden bleiben geschützt. Eine Vorschau zeigt vorab alle betroffenen Dateien.
 - **Lange nicht genutzt:** Serien ohne Aktivität seit `X` Tagen (gemessen an `lastOpenedAt`, Schau-Historie und Dateiänderungsdatum) können automatisch nach `Sondra/Archiv/<Titel>/Staffel <n>/` verschoben, mit FFmpeg platzsparend auf `720p` oder `480p` verkleinert, aus Google Drive auf eine lokale Festplatte ausgelagert, für weitere Auto-Downloads pausiert oder nach einer zweiten Frist endgültig entfernt werden. Archivierte Folgen lassen sich jederzeit mit einem Klick nach `Sondra/Serien/` zurücklegen.
 
-## Installation & Start
+## Installation, Microsoft Store & Website
 
-### Windows-App (Installer & Portabel)
+### Windows-App (Microsoft Store, Setup-`.exe` & Portabel)
 
-Über die [Releases](https://github.com/bananaaboy/Sondra-AD/releases/latest) stehen zwei Fassungen bereit:
+Sondra AD ist hauptsächlich als eigenständige Windows-Anwendung konzipiert und wird in drei Fassungen gebaut:
 
+- **Microsoft Store (`.appx` / MSIX):** Signiertes Store-Paket für Windows 10 und 11 (`Sondra-AD-Store-<Version>.appx` für `x64` und `Arm64`) ohne SmartScreen-Abfrage und mit automatischen Updates über den Store.
 - **`Sondra-AD-Setup.exe`** (für Arm-Rechner: `Sondra-AD-Setup-arm64.exe`): Installiert Sondra AD unter `Programme`, legt Startmenü- und Desktop-Verknüpfungen an und startet auf Wunsch automatisch minimiert im System-Tray (`--minimized`). Stille Installation: `Sondra-AD-Setup.exe /S`.
 - **`Sondra-AD-Portable.exe`** (für Arm-Rechner: `Sondra-AD-Portable-arm64.exe`): Startet ohne Installation und legt sämtliche Einstellungen, Datenbanken und Protokolle daneben im Ordner `Sondra-AD-Daten` ab.
 
+Über die [Releases](https://github.com/bananaaboy/Sondra-AD/releases/latest) stehen die `.exe`-Pakete bereit; die MSIX-Pakete für das Partner Center entstehen bei jedem Lauf des `Desktop`-Workflows.
+
 Die lokale Oberfläche nutzt Port `47210` (portabel: `47211`), sodass Sondra und Sondra AD problemlos gleichzeitig auf demselben Rechner laufen.
+
+### Statische Website (`dist/`)
+
+Wird das gebaute Verzeichnis `dist/` statisch ausgeliefert (etwa über Vercel, Cloudflare Pages oder GitHub Pages ohne lokalen Hintergrunddienst), zeigt Sondra AD automatisch die reine Informations- und Download-Website mit **Downloads** (Windows-Setup, Microsoft Store, Portabel, SmartScreen-Hinweis), **Datenschutz**, **Lizenzen** und **Einrichtung & Hilfe** an.
 
 ### Server-Modus (Windows, Linux, macOS)
 
@@ -80,12 +87,13 @@ Optionale Umgebungsvariablen für den Server-Betrieb:
 
 | Befehl | Beschreibung |
 |---|---|
-| `npm run dev` | Vite-Entwicklungsserver für die Oberfläche |
+| `npm run dev` | Vite-Entwicklungsserver |
 | `npm run typecheck` | TypeScript-Typprüfung ohne Dateiausgabe |
 | `npm run build` | Produktionsbündel nach `dist/` bauen |
-| `npm run verify` | Vollständige Funktionsprüfung (SQLite-Merkliste, Kopplungspaket, Geräte-Signatur, Hoster-Fallback, Resumable-Upload, Staffel-Erkennung, Speicherbereinigung, Archiv) |
-| `npm run verify:e2e` | Browser-End-to-End-Prüfung über alle sechs Reiter mit Playwright |
+| `npm run verify` | Vollständige Funktionsprüfung (Tray-Icons, Store-Kacheln, SQLite-Merkliste, Kopplungspaket, Geräte-Signatur, Hoster-Fallback, Resumable-Upload, Staffel-Erkennung, Speicherbereinigung, Archiv) |
+| `npm run verify:e2e` | Browser-End-to-End-Prüfung (App-Modus und statische Download-/Datenschutz-/Lizenz-Website) |
 | `npm run build:desktop` | Windows-Installer (`NSIS`) und portable Fassung bauen |
+| `node scripts/build-desktop.mjs --store` | MSIX-Paket für den Microsoft Store bauen |
 
 ## Lizenz
 

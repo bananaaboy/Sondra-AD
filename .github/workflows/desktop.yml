@@ -135,6 +135,75 @@ jobs:
           Get-Process 'Sondra AD' -ErrorAction SilentlyContinue | Stop-Process -Force
           node scripts/desktop-ui-test.mjs (Join-Path $env:ProgramFiles 'Sondra AD\Sondra AD.exe') ui-shots
 
+      - name: Build, install and start the Store package (MSIX)
+        shell: pwsh
+        env:
+          SONDRA_STORE_IDENTITY_NAME: ${{ vars.STORE_IDENTITY_NAME || secrets.STORE_IDENTITY_NAME }}
+          SONDRA_STORE_PUBLISHER: ${{ vars.STORE_PUBLISHER || secrets.STORE_PUBLISHER }}
+          SONDRA_STORE_PUBLISHER_NAME: ${{ vars.STORE_PUBLISHER_NAME || secrets.STORE_PUBLISHER_NAME }}
+          SONDRA_STORE_DISPLAY_NAME: ${{ vars.STORE_DISPLAY_NAME || secrets.STORE_DISPLAY_NAME }}
+          SONDRA_GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID || secrets.GOOGLE_CLIENT_ID }}
+          SONDRA_GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+        run: |
+          node scripts/build-desktop.mjs --store --${{ matrix.arch }}
+          if ($LASTEXITCODE -ne 0) { throw 'Store-Paket nicht gebaut.' }
+          $package = Get-ChildItem release -Filter 'Sondra-AD-Store-*.appx' | Select-Object -First 1
+          if (-not $package) { throw 'Kein .appx in release/.' }
+          Write-Host "Paket: $($package.Name), $([math]::Round($package.Length / 1MB)) MB"
+
+          $unpacked = Join-Path $env:RUNNER_TEMP 'appx'
+          Copy-Item $package.FullName "$unpacked.zip"
+          Expand-Archive "$unpacked.zip" $unpacked -Force
+          [xml]$manifest = Get-Content (Join-Path $unpacked 'AppxManifest.xml')
+          $identity = $manifest.Package.Identity
+          Write-Host "Identity: $($identity.Name) · $($identity.Publisher) · $($identity.Version)"
+
+          $cert = New-SelfSignedCertificate -Type Custom -Subject $identity.Publisher -KeyUsage DigitalSignature `
+            -FriendlyName 'Sondra AD CI' -CertStoreLocation 'Cert:\CurrentUser\My' `
+            -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3', '2.5.29.19={text}')
+          $pfx = Join-Path $env:RUNNER_TEMP 'ci.pfx'
+          $password = ConvertTo-SecureString -String 'ci' -Force -AsPlainText
+          Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $password | Out-Null
+          Import-PfxCertificate -FilePath $pfx -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' -Password $password | Out-Null
+          $tools = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe
+          $signtool = $tools | Where-Object { $_.FullName -match '\\${{ matrix.arch }}\\' } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { $signtool = $tools | Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName -Descending | Select-Object -First 1 }
+          $signed = Join-Path $env:RUNNER_TEMP 'Sondra-AD-Test.appx'
+          Copy-Item $package.FullName $signed
+          & $signtool.FullName sign /fd SHA256 /a /f $pfx /p ci $signed
+          if ($LASTEXITCODE -ne 0) { throw 'Testsignatur fehlgeschlagen.' }
+
+          Add-AppxPackage -Path $signed
+          $installed = Get-AppxPackage -Name $identity.Name
+          if (-not $installed) { throw 'Paket ist nicht installiert.' }
+          Write-Host "Installiert: $($installed.PackageFullName)"
+
+          Get-Process 'Sondra AD' -ErrorAction SilentlyContinue | Stop-Process -Force
+          Remove-Item (Join-Path $env:APPDATA 'Sondra AD\sondra-ad.log') -ErrorAction SilentlyContinue
+          Start-Process "shell:AppsFolder\$($installed.PackageFamilyName)!SondraAD"
+          $logStore = Join-Path $env:LOCALAPPDATA "Packages\$($installed.PackageFamilyName)\LocalCache\Roaming\Sondra AD\sondra-ad.log"
+          $logRoaming = Join-Path $env:APPDATA 'Sondra AD\sondra-ad.log'
+          $log = $logStore
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Get-Date) -lt $deadline) {
+            if ((Test-Path $logStore) -and (Select-String -Path $logStore -Pattern 'Geladen:' -Quiet)) { $log = $logStore; break }
+            if ((Test-Path $logRoaming) -and (Select-String -Path $logRoaming -Pattern 'Geladen:' -Quiet)) { $log = $logRoaming; break }
+            Start-Sleep -Seconds 2
+          }
+          if (-not (Test-Path $log)) { $log = $logRoaming }
+          Get-Content $log -Tail 12
+          if (-not (Select-String -Path $log -Pattern 'Microsoft Store' -Quiet)) { throw 'Die App weiss nicht, dass sie aus dem Store kommt.' }
+          if (-not (Select-String -Path $log -Pattern 'Geladen:' -Quiet)) { throw 'Das Store-Paket hat die Oberflaeche nicht geladen.' }
+          Get-Process 'Sondra AD' -ErrorAction SilentlyContinue | Stop-Process -Force
+          Remove-AppxPackage -Package $installed.PackageFullName
+          Write-Host 'Store-Paket gebaut, installiert, gestartet.'
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: Sondra-AD-Store-MSIX${{ matrix.suffix }}
+          path: release/Sondra-AD-Store-*.appx
+          retention-days: 30
+
       - name: Show the app's log
         if: always()
         shell: pwsh

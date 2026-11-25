@@ -1,3 +1,13 @@
+interface ImportMetaEnv {
+  readonly VITE_MICROSOFT_STORE_URL?: string
+  readonly VITE_WEBSITE_ONLY?: string
+  readonly [key: string]: string | boolean | undefined
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv
+}
+
 declare module 'qrcode-generator' {
   type ErrorCorrectionLevel = 'L' | 'M' | 'Q' | 'H'
   type TypeNumber =
