@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import {
@@ -60,7 +61,9 @@ export function getLocalFreeBytes(dirPath) {
   try {
     fs.mkdirSync(dirPath, { recursive: true })
     const st = fs.statfsSync(dirPath)
-    return Number(st.bavail) * Number(st.bsize)
+    if (Number(st.blocks) <= 0 || Number(st.bsize) <= 0) return null
+    const avail = st.bavail ?? st.bfree
+    return Number(avail) * Number(st.bsize)
   } catch {
     return null
   }
@@ -125,11 +128,23 @@ export function computeRetryDelayMs(attempt, baseMinutes = 5) {
   return Math.min(12 * 60 * 60_000, Math.round(baseMs * mult))
 }
 
-async function streamUrlToFile(url, destFile, { referer, localAddress, maxBandwidthKbps = 0, onProgress, signal } = {}) {
-  const headers = {
-    'User-Agent': DEFAULT_USER_AGENT,
-    ...(referer ? { Referer: referer } : {}),
+function buildStreamHeaders(referer) {
+  let origin = null
+  if (referer) {
+    try {
+      origin = new URL(referer).origin
+    } catch {
+      origin = null
+    }
   }
+  return {
+    'User-Agent': DEFAULT_USER_AGENT,
+    ...(referer ? { Referer: referer, ...(origin ? { Origin: origin } : {}) } : {}),
+  }
+}
+
+async function streamUrlToFile(url, destFile, { referer, localAddress, maxBandwidthKbps = 0, onProgress, signal } = {}) {
+  const headers = buildStreamHeaders(referer)
   const res = await boundedFetch(url, {
     headers,
     localAddress,
@@ -144,7 +159,13 @@ async function streamUrlToFile(url, destFile, { referer, localAddress, maxBandwi
   if (/mpegurl/i.test(contentType) || /\.m3u8(?:$|\?)/i.test(url)) {
     const text = await res.text()
     if (text.trimStart().startsWith('#EXTM3U')) {
-      return downloadHlsSegmentsNative(text, res.url || url, destFile, { referer, localAddress, onProgress, signal })
+      return downloadHlsSegmentsNative(text, res.url || url, destFile, {
+        referer,
+        localAddress,
+        maxBandwidthKbps,
+        onProgress,
+        signal,
+      })
     }
   }
 
@@ -203,17 +224,27 @@ async function streamUrlToFile(url, destFile, { referer, localAddress, maxBandwi
   return destFile
 }
 
-async function downloadHlsSegmentsNative(playlistText, baseUrl, destFile, { referer, localAddress, onProgress, signal, maxHeight = 0 } = {}) {
+export async function downloadHlsSegmentsNative(
+  playlistText,
+  baseUrl,
+  destFile,
+  { referer, localAddress, maxBandwidthKbps = 0, onProgress, signal, maxHeight = 0 } = {},
+) {
   let activeText = playlistText
   let activeBase = baseUrl
+  const headers = buildStreamHeaders(referer)
 
-  const lines = activeText.split(/\r?\n/).map((l) => l.trim())
+  const masterLines = activeText.split(/\r?\n/).map((l) => l.trim())
+  if (masterLines.some((l) => l.startsWith('#EXT-X-MEDIA') && /TYPE=AUDIO/i.test(l) && /URI=/i.test(l))) {
+    throw new Error('HLS besitzt separate Tonspur')
+  }
+
   const variants = []
-  for (let i = 0; i < lines.length; i += 1) {
-    if (lines[i].startsWith('#EXT-X-STREAM-INF')) {
-      const resMatch = lines[i].match(/RESOLUTION=(\d+)x(\d+)/i)
-      const bwMatch = lines[i].match(/BANDWIDTH=(\d+)/i)
-      const nextUri = lines.slice(i + 1).find((l) => l && !l.startsWith('#'))
+  for (let i = 0; i < masterLines.length; i += 1) {
+    if (masterLines[i].startsWith('#EXT-X-STREAM-INF')) {
+      const resMatch = masterLines[i].match(/RESOLUTION=(\d+)x(\d+)/i)
+      const bwMatch = masterLines[i].match(/BANDWIDTH=(\d+)/i)
+      const nextUri = masterLines.slice(i + 1).find((l) => l && !l.startsWith('#'))
       if (nextUri) {
         variants.push({
           height: resMatch ? Number(resMatch[2]) : 0,
@@ -227,12 +258,9 @@ async function downloadHlsSegmentsNative(playlistText, baseUrl, destFile, { refe
   if (variants.length > 0) {
     variants.sort((a, b) => b.height - a.height || b.bandwidth - a.bandwidth)
     const fitting = maxHeight > 0 ? variants.filter((v) => v.height <= maxHeight) : []
-    const chosen = (fitting.length > 0 ? fitting[0] : variants[0])
+    const chosen = fitting.length > 0 ? fitting[0] : variants[0]
     const subRes = await boundedFetch(chosen.url, {
-      headers: {
-        'User-Agent': DEFAULT_USER_AGENT,
-        ...(referer ? { Referer: referer } : {}),
-      },
+      headers,
       localAddress,
       signal,
     })
@@ -241,48 +269,148 @@ async function downloadHlsSegmentsNative(playlistText, baseUrl, destFile, { refe
     activeBase = subRes.url || chosen.url
   }
 
-  const segmentUrls = activeText
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith('#'))
-    .map((l) => new URL(l, activeBase).href)
+  const mediaLines = activeText.split(/\r?\n/).map((l) => l.trim())
+  let mediaSequence = 0
+  let currentMapUrl = null
+  let currentKey = null
+  const segments = []
 
-  if (segmentUrls.length === 0) {
+  for (const line of mediaLines) {
+    if (!line) continue
+    if (line.startsWith('#EXT-X-MEDIA-SEQUENCE:')) {
+      const seqMatch = line.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/i)
+      if (seqMatch) mediaSequence = Number(seqMatch[1])
+      continue
+    }
+    if (line.startsWith('#EXT-X-MAP:')) {
+      const uriMatch = line.match(/URI="([^"]+)"/i) || line.match(/URI=([^,\s]+)/i)
+      if (uriMatch && uriMatch[1]) {
+        currentMapUrl = new URL(uriMatch[1], activeBase).href
+      }
+      continue
+    }
+    if (line.startsWith('#EXT-X-KEY:')) {
+      const methodMatch = line.match(/METHOD=([^,\s]+)/i)
+      const method = methodMatch ? methodMatch[1].replace(/^"|"$/g, '').toUpperCase() : 'NONE'
+      if (method === 'NONE') {
+        currentKey = null
+      } else if (method === 'AES-128') {
+        const uriMatch = line.match(/URI="([^"]+)"/i) || line.match(/URI=([^,\s]+)/i)
+        const ivMatch = line.match(/IV=0x([0-9a-fA-F]+)/i)
+        if (!uriMatch || !uriMatch[1]) {
+          throw new Error('HLS-Schlüsseladresse fehlt.')
+        }
+        currentKey = {
+          method: 'AES-128',
+          uri: new URL(uriMatch[1], activeBase).href,
+          ivHex: ivMatch ? ivMatch[1] : null,
+        }
+      } else {
+        throw new Error(`Nicht unterstützte HLS-Verschlüsselung: ${method}`)
+      }
+      continue
+    }
+    if (line.startsWith('#')) continue
+    const segIndex = segments.length
+    segments.push({
+      url: new URL(line, activeBase).href,
+      seq: mediaSequence + segIndex,
+      key: currentKey,
+      mapUrl: currentMapUrl,
+    })
+  }
+
+  if (segments.length === 0) {
     throw new Error('HLS-Wiedergabeliste enthält keine Segmente.')
   }
 
-  fs.mkdirSync(path.dirname(destFile), { recursive: true })
-  const out = fs.createWriteStream(destFile)
+  const hasFmp4 = segments.some((s) => s.mapUrl || /\.(?:m4s|mp4|cmfv)(?:$|\?)/i.test(s.url))
+  const actualDestFile = hasFmp4 && destFile.endsWith('.ts') ? `${destFile.slice(0, -3)}.mp4` : destFile
+
+  const fetchBufferWithRetry = async (targetUrl, label) => {
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      if (signal?.aborted) throw new Error('Abgebrochen')
+      try {
+        const res = await boundedFetch(targetUrl, {
+          headers,
+          localAddress,
+          signal,
+          timeout: 25_000,
+        })
+        if (!res.ok) throw new Error(`${label} fehlgeschlagen (${res.status})`)
+        return Buffer.from(await res.arrayBuffer())
+      } catch (err) {
+        if (signal?.aborted || attempt === 3) throw err
+        await new Promise((r) => setTimeout(r, 350 * attempt))
+      }
+    }
+    throw new Error(`${label} fehlgeschlagen`)
+  }
+
+  const keyCache = new Map()
+  const decryptBuffer = async (buf, keySpec, seq) => {
+    if (!keySpec) return buf
+    let keyBuf = keyCache.get(keySpec.uri)
+    if (!keyBuf) {
+      keyBuf = await fetchBufferWithRetry(keySpec.uri, 'HLS-Schlüssel')
+      if (keyBuf.byteLength !== 16) {
+        throw new Error(`Ungültige HLS-Schlüssellänge (${keyBuf.byteLength} Bytes)`)
+      }
+      keyCache.set(keySpec.uri, keyBuf)
+    }
+    let ivBuf
+    if (keySpec.ivHex) {
+      ivBuf = Buffer.from(keySpec.ivHex.padStart(32, '0').slice(-32), 'hex')
+    } else {
+      ivBuf = Buffer.alloc(16)
+      ivBuf.writeBigUInt64BE(BigInt(seq), 8)
+    }
+    const decipher = crypto.createDecipheriv('aes-128-cbc', keyBuf, ivBuf)
+    return Buffer.concat([decipher.update(buf), decipher.final()])
+  }
+
+  fs.mkdirSync(path.dirname(actualDestFile), { recursive: true })
+  const out = fs.createWriteStream(actualDestFile)
   let loadedBytes = 0
+  let writtenMapUrl = null
   const startedAt = Date.now()
   try {
-    for (let idx = 0; idx < segmentUrls.length; idx += 1) {
+    for (let idx = 0; idx < segments.length; idx += 1) {
       if (signal?.aborted) throw new Error('Abgebrochen')
-      const segRes = await boundedFetch(segmentUrls[idx], {
-        headers: {
-          'User-Agent': DEFAULT_USER_AGENT,
-          ...(referer ? { Referer: referer } : {}),
-        },
-        localAddress,
-        signal,
-        timeout: 25_000,
-      })
-      if (!segRes.ok) throw new Error(`HLS-Segment ${idx + 1}/${segmentUrls.length} fehlgeschlagen (${segRes.status})`)
-      const buf = Buffer.from(await segRes.arrayBuffer())
+      const seg = segments[idx]
+      if (seg.mapUrl && seg.mapUrl !== writtenMapUrl) {
+        const rawMap = await fetchBufferWithRetry(seg.mapUrl, 'HLS-Init-Segment')
+        const mapBuf = seg.key && seg.key.ivHex ? await decryptBuffer(rawMap, seg.key, seg.seq) : rawMap
+        loadedBytes += mapBuf.byteLength
+        if (!out.write(mapBuf)) {
+          await new Promise((r) => out.once('drain', r))
+        }
+        writtenMapUrl = seg.mapUrl
+      }
+
+      const rawSeg = await fetchBufferWithRetry(seg.url, `HLS-Segment ${idx + 1}/${segments.length}`)
+      const buf = await decryptBuffer(rawSeg, seg.key, seg.seq)
       loadedBytes += buf.byteLength
       if (!out.write(buf)) {
         await new Promise((r) => out.once('drain', r))
       }
+      if (maxBandwidthKbps > 0) {
+        const expectedMs = (loadedBytes / (maxBandwidthKbps * 1024)) * 1000
+        const elapsedMs = Date.now() - startedAt
+        if (expectedMs > elapsedMs + 40) {
+          await new Promise((r) => setTimeout(r, Math.min(1000, expectedMs - elapsedMs)))
+        }
+      }
       if (onProgress) {
-        const pct = Math.round(((idx + 1) / segmentUrls.length) * 100)
+        const pct = Math.round(((idx + 1) / segments.length) * 100)
         const elapsedSec = Math.max(0.2, (Date.now() - startedAt) / 1000)
         const speedBps = Math.round(loadedBytes / elapsedSec)
-        const remainingSegs = segmentUrls.length - (idx + 1)
+        const remainingSegs = segments.length - (idx + 1)
         const avgSegSec = elapsedSec / (idx + 1)
         onProgress({
           pct,
           loaded: loadedBytes,
-          total: Math.round((loadedBytes / (idx + 1)) * segmentUrls.length),
+          total: Math.round((loadedBytes / (idx + 1)) * segments.length),
           speedBps,
           etaSeconds: Math.round(remainingSegs * avgSegSec),
         })
@@ -292,11 +420,11 @@ async function downloadHlsSegmentsNative(playlistText, baseUrl, destFile, { refe
   } catch (err) {
     out.destroy()
     try {
-      fs.rmSync(destFile, { force: true })
+      fs.rmSync(actualDestFile, { force: true })
     } catch {}
     throw err
   }
-  return destFile
+  return actualDestFile
 }
 
 export function createDownloaderWorker({ store, driveAuth, driveService, mediaTools, onNotify = null }) {
@@ -391,39 +519,46 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
       const effectiveBw = resolveEffectiveBandwidthKbps(settings)
 
       if (isDirectSupportedUrl(job.url)) {
-        let extracted = null
-        if (settings.language === 'auto' && Array.isArray(settings.languagePriority) && settings.languagePriority.length > 0 && isAniworldUrl(job.url)) {
-          for (let i = 0; i < settings.languagePriority.length; i += 1) {
-            const prefLang = settings.languagePriority[i]
-            if (!prefLang || prefLang === 'auto') continue
-            const isLast = i === settings.languagePriority.length - 1
-            const attempt = await extractDirectMedia(job.url, {
-              localAddress,
-              language: prefLang,
-              hosterPriority: settings.hosterPriority,
-              maxMirrors: 6,
-              strictLanguage: !isLast,
-              signal: controller.signal,
-            })
-            if (attempt && !attempt.languageMissing && ((attempt.streams && attempt.streams.length > 0) || attempt.url)) {
-              extracted = attempt
-              resolvedLanguage = prefLang
-              break
-            }
-          }
+        const extracted = await extractDirectMedia(job.url, {
+          localAddress,
+          language: settings.language,
+          languagePriority: settings.language === 'auto' ? settings.languagePriority : undefined,
+          hosterPriority: settings.hosterPriority,
+          maxMirrors: 6,
+          strictLanguage: shouldStrictWaitLanguage,
+          signal: controller.signal,
+        })
+        if (!resolvedLanguage && extracted?.selectedLanguage) {
+          resolvedLanguage = extracted.selectedLanguage
         }
-        if (!extracted) {
-          extracted = await extractDirectMedia(job.url, {
-            localAddress,
-            language: settings.language,
-            hosterPriority: settings.hosterPriority,
-            maxMirrors: 6,
-            strictLanguage: shouldStrictWaitLanguage,
-            signal: controller.signal,
-          })
-          if (!resolvedLanguage && extracted?.selectedLanguage) {
-            resolvedLanguage = extracted.selectedLanguage
+
+        if (extracted?.isPlaylist && Array.isArray(extracted.items) && extracted.items.length > 0) {
+          let addedCount = 0
+          for (let i = 0; i < extracted.items.length; i += 1) {
+            const ep = extracted.items[i]
+            if (!ep?.url) continue
+            const enq = enqueueJob({
+              url: ep.url,
+              title: ep.title || `${extracted.title || job.title} - ${i + 1}`,
+              seriesId: job.seriesId || null,
+              seriesTitle: extracted.seriesTitle || job.seriesTitle || extracted.title || null,
+              season: typeof ep.seasonNumber === 'number' ? ep.seasonNumber : job.season ?? 1,
+              episode: typeof ep.episodeNumber === 'number' ? ep.episodeNumber : i + 1,
+              language: job.language,
+              mode: job.mode,
+              videoPref: job.videoPref,
+              manualForce: Boolean(job.manualForce),
+            })
+            if (enq.added) addedCount += 1
           }
+          store.setQueue(store.getQueue().filter((q) => q.id !== job.id), true)
+          store.addLog({
+            category: 'download',
+            level: 'info',
+            title: `Sammlung aufgelöst: ${extracted.title || job.title}`,
+            message: `${addedCount} Einzeleinträge wurden in die Warteschlange eingereiht.`,
+          })
+          return
         }
 
         if (extracted?.languageMissing) {
@@ -470,65 +605,151 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
         )
 
         let lastStreamError = null
-        for (const stream of candidateStreams) {
-          if (controller.signal.aborted) throw new Error('Abgebrochen')
-          const providerName = stream.provider || 'Stream'
-          if (job.preferredHoster && !providerName.toLowerCase().includes(String(job.preferredHoster).toLowerCase())) {
-            continue
-          }
-          store.patchQueueItem(job.id, { activeHoster: providerName })
+        if (extracted?.isSpotifyTrack && extracted.searchQuery) {
           try {
-            const outExt =
-              settings.mode === 'audio'
-                ? settings.audioFormat === 'original'
-                  ? 'm4a'
-                  : settings.audioFormat
-                : stream.ext || 'mp4'
-            const candidateFile = path.join(stageDir, `${baseTitle}.${outExt}`)
-            const isHls = Boolean(stream.isHls) || /\.m3u8(?:$|\?)/i.test(stream.url)
-
-            if (isHls && mediaTools.findFfmpeg()) {
-              const ok = await mediaTools.remuxHlsWithFfmpeg({
-                m3u8Url: stream.url,
-                referer: stream.referer,
-                outputFile: candidateFile,
-                mode: settings.mode,
-                audioFormat: settings.audioFormat,
-                signal: controller.signal,
-              })
-              if (!ok) throw new Error(`${providerName}: HLS-Verarbeitung mit FFmpeg fehlgeschlagen`)
-              downloadedPath = candidateFile
-            } else if (isHls) {
-              const m3u8Res = await boundedFetch(stream.url, {
-                headers: {
-                  'User-Agent': DEFAULT_USER_AGENT,
-                  ...(stream.referer ? { Referer: stream.referer } : {}),
-                },
+            downloadedPath = await mediaTools.downloadViaYtdlp({
+              url: extracted.searchQuery,
+              outputPathNoExt: path.join(stageDir, baseTitle),
+              mode: 'audio',
+              videoPref: settings.videoPref,
+              audioFormat: settings.audioFormat === 'original' ? 'mp3' : settings.audioFormat,
+              maxBandwidthKbps: effectiveBw.maxBandwidthKbps,
+              signal: controller.signal,
+              onProgress: (p) =>
+                store.patchQueueItem(job.id, {
+                  progress: p.pct,
+                  loadedBytes: p.loaded,
+                  totalBytes: p.total,
+                  speedBps: p.speedBps,
+                  etaSeconds: p.etaSeconds,
+                }),
+            })
+            usedHoster = 'Spotify · yt-dlp'
+            finalFileName = path.basename(downloadedPath)
+          } catch (spotErr) {
+            if (extracted.previewUrl) {
+              const previewDest = path.join(stageDir, `${baseTitle}.mp3`)
+              await streamUrlToFile(extracted.previewUrl, previewDest, {
                 localAddress,
+                maxBandwidthKbps: effectiveBw.maxBandwidthKbps,
                 signal: controller.signal,
               })
-              if (!m3u8Res.ok) throw new Error(`${providerName}: HTTP ${m3u8Res.status}`)
-              const m3u8Text = await m3u8Res.text()
-              const tsFile = path.join(stageDir, `${baseTitle}.ts`)
-              await downloadHlsSegmentsNative(m3u8Text, m3u8Res.url || stream.url, tsFile, {
-                referer: stream.referer,
-                localAddress,
-                maxHeight,
-                signal: controller.signal,
-                onProgress: (p) =>
-                  store.patchQueueItem(job.id, {
-                    progress: p.pct,
-                    loadedBytes: p.loaded,
-                    totalBytes: p.total,
-                    speedBps: p.speedBps,
-                    etaSeconds: p.etaSeconds,
-                  }),
-              })
-              downloadedPath = tsFile
+              downloadedPath = previewDest
+              usedHoster = 'Spotify · Vorschau'
+              finalFileName = path.basename(previewDest)
             } else {
-              await streamUrlToFile(stream.url, candidateFile, {
-                referer: stream.referer,
-                localAddress,
+              lastStreamError = spotErr
+            }
+          }
+        }
+
+        if (!downloadedPath) {
+          for (const stream of candidateStreams) {
+            if (controller.signal.aborted) throw new Error('Abgebrochen')
+            if (!stream?.url) continue
+            const providerName = stream.provider || 'Stream'
+            if (job.preferredHoster && !providerName.toLowerCase().includes(String(job.preferredHoster).toLowerCase())) {
+              continue
+            }
+            store.patchQueueItem(job.id, { activeHoster: providerName })
+            try {
+              const outExt =
+                settings.mode === 'audio'
+                  ? settings.audioFormat === 'original'
+                    ? 'm4a'
+                    : settings.audioFormat
+                  : stream.ext || 'mp4'
+              const candidateFile = path.join(stageDir, `${baseTitle}.${outExt}`)
+              const isHls = Boolean(stream.isHls) || /\.m3u8(?:$|\?)/i.test(stream.url)
+
+              if (isHls && mediaTools.findFfmpeg()) {
+                const ok = await mediaTools.remuxHlsWithFfmpeg({
+                  m3u8Url: stream.url,
+                  referer: stream.referer,
+                  outputFile: candidateFile,
+                  mode: settings.mode,
+                  audioFormat: settings.audioFormat,
+                  signal: controller.signal,
+                })
+                if (!ok) throw new Error(`${providerName}: HLS-Verarbeitung mit FFmpeg fehlgeschlagen`)
+                downloadedPath = candidateFile
+              } else if (isHls) {
+                const m3u8Res = await boundedFetch(stream.url, {
+                  headers: buildStreamHeaders(stream.referer),
+                  localAddress,
+                  signal: controller.signal,
+                })
+                if (!m3u8Res.ok) throw new Error(`${providerName}: HTTP ${m3u8Res.status}`)
+                const m3u8Text = await m3u8Res.text()
+                const tsFile = path.join(stageDir, `${baseTitle}.ts`)
+                downloadedPath = await downloadHlsSegmentsNative(m3u8Text, m3u8Res.url || stream.url, tsFile, {
+                  referer: stream.referer,
+                  localAddress,
+                  maxBandwidthKbps: effectiveBw.maxBandwidthKbps,
+                  maxHeight,
+                  signal: controller.signal,
+                  onProgress: (p) =>
+                    store.patchQueueItem(job.id, {
+                      progress: p.pct,
+                      loadedBytes: p.loaded,
+                      totalBytes: p.total,
+                      speedBps: p.speedBps,
+                      etaSeconds: p.etaSeconds,
+                    }),
+                })
+              } else {
+                downloadedPath = await streamUrlToFile(stream.url, candidateFile, {
+                  referer: stream.referer,
+                  localAddress,
+                  maxBandwidthKbps: effectiveBw.maxBandwidthKbps,
+                  signal: controller.signal,
+                  onProgress: (p) =>
+                    store.patchQueueItem(job.id, {
+                      progress: p.pct,
+                      loadedBytes: p.loaded,
+                      totalBytes: p.total,
+                      speedBps: p.speedBps,
+                      etaSeconds: p.etaSeconds,
+                    }),
+                })
+              }
+
+              usedHoster = providerName
+              finalFileName = path.basename(downloadedPath)
+              break
+            } catch (streamErr) {
+              if (controller.signal.aborted) throw streamErr
+              lastStreamError = streamErr
+              triedHosters.push(`${providerName} (${streamErr?.message || 'Fehler'})`)
+              store.addLog({
+                category: 'retry',
+                level: 'warn',
+                title: `Hoster-Wechsel bei ${job.seriesTitle || job.title}`,
+                message: `${providerName} fehlgeschlagen (${streamErr?.message || 'Fehler'}) — versuche nächsten Hoster.`,
+                seriesId: job.seriesId,
+                seriesTitle: job.seriesTitle,
+                season: job.season,
+                episode: job.episode,
+                hoster: providerName,
+              })
+            }
+          }
+        }
+
+        if (!downloadedPath && mediaTools.findYtdlp() && candidateStreams.length > 0) {
+          for (const stream of candidateStreams.slice(0, 2)) {
+            if (controller.signal.aborted) throw new Error('Abgebrochen')
+            const targetStreamUrl = stream.embedUrl || stream.url
+            if (!targetStreamUrl) continue
+            try {
+              const templateBase = path.join(stageDir, baseTitle)
+              downloadedPath = await mediaTools.downloadViaYtdlp({
+                url: targetStreamUrl,
+                outputPathNoExt: templateBase,
+                mode: settings.mode,
+                videoPref: settings.videoPref,
+                audioFormat: settings.audioFormat,
+                referer: stream.referer || undefined,
                 maxBandwidthKbps: effectiveBw.maxBandwidthKbps,
                 signal: controller.signal,
                 onProgress: (p) =>
@@ -540,27 +761,12 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
                     etaSeconds: p.etaSeconds,
                   }),
               })
-              downloadedPath = candidateFile
+              usedHoster = `${stream.provider || 'Stream'} · yt-dlp`
+              finalFileName = path.basename(downloadedPath)
+              break
+            } catch (ytdlpStreamErr) {
+              if (!lastStreamError) lastStreamError = ytdlpStreamErr
             }
-
-            usedHoster = providerName
-            finalFileName = path.basename(downloadedPath)
-            break
-          } catch (streamErr) {
-            if (controller.signal.aborted) throw streamErr
-            lastStreamError = streamErr
-            triedHosters.push(`${providerName} (${streamErr?.message || 'Fehler'})`)
-            store.addLog({
-              category: 'retry',
-              level: 'warn',
-              title: `Hoster-Wechsel bei ${job.seriesTitle || job.title}`,
-              message: `${providerName} fehlgeschlagen (${streamErr?.message || 'Fehler'}) — versuche nächsten Hoster.`,
-              seriesId: job.seriesId,
-              seriesTitle: job.seriesTitle,
-              season: job.season,
-              episode: job.episode,
-              hoster: providerName,
-            })
           }
         }
 
@@ -573,6 +779,7 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
               mode: settings.mode,
               videoPref: settings.videoPref,
               audioFormat: settings.audioFormat,
+              maxBandwidthKbps: effectiveBw.maxBandwidthKbps,
               signal: controller.signal,
               onProgress: (p) =>
                 store.patchQueueItem(job.id, {
@@ -599,9 +806,9 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
         if (/\.(?:mp4|m4v|webm|mkv|mp3|m4a|flac|ogg|opus|wav)(?:$|\?)/i.test(job.url)) {
           const urlExt = new URL(job.url).pathname.split('.').pop() || 'mp4'
           const directDest = path.join(stageDir, `${baseTitle}.${urlExt}`)
-          await streamUrlToFile(job.url, directDest, {
+          downloadedPath = await streamUrlToFile(job.url, directDest, {
             localAddress,
-            maxBandwidthKbps: settings.maxBandwidthKbps,
+            maxBandwidthKbps: effectiveBw.maxBandwidthKbps,
             signal: controller.signal,
             onProgress: (p) =>
               store.patchQueueItem(job.id, {
@@ -612,9 +819,8 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
                 etaSeconds: p.etaSeconds,
               }),
           })
-          downloadedPath = directDest
           usedHoster = 'Direkt'
-          finalFileName = path.basename(directDest)
+          finalFileName = path.basename(downloadedPath)
         } else {
           downloadedPath = await mediaTools.downloadViaYtdlp({
             url: job.url,
@@ -622,6 +828,7 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
             mode: settings.mode,
             videoPref: settings.videoPref,
             audioFormat: settings.audioFormat,
+            maxBandwidthKbps: effectiveBw.maxBandwidthKbps,
             signal: controller.signal,
             onProgress: (p) =>
               store.patchQueueItem(job.id, {
@@ -647,13 +854,21 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
       const wantsLocal = settings.storageTarget === 'local_only' || settings.storageTarget === 'drive_and_local'
       const wantsWebdav = settings.storageTarget === 'webdav_only' || settings.storageTarget === 'drive_and_webdav'
 
+      let effectiveWantsDrive = wantsDrive
+      let effectiveWantsLocal = wantsLocal
+      let fellBackToLocal = false
+      if (effectiveWantsDrive && !driveAuth.isConnected()) {
+        effectiveWantsDrive = false
+        if (!wantsWebdav) {
+          effectiveWantsLocal = true
+          fellBackToLocal = true
+        }
+      }
+
       let driveFile = null
       let driveRelPath = null
 
-      if (wantsDrive) {
-        if (!driveAuth.isConnected()) {
-          throw new Error('Speicherziel ist Google Drive, aber Google Drive ist aktuell nicht verbunden.')
-        }
+      if (effectiveWantsDrive) {
         store.patchQueueItem(
           job.id,
           {
@@ -693,7 +908,7 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
       }
 
       let savedLocalPath = null
-      if (wantsLocal) {
+      if (effectiveWantsLocal) {
         const subDir = job.seriesTitle
           ? path.join(
               settings.localDir,
@@ -800,7 +1015,7 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
         category: 'download',
         level: 'info',
         title: job.isUpgrade ? `Sprach-Upgrade: ${finalFileName}` : `Geladen: ${finalFileName}`,
-        message: `Gespeichert unter ${locationLabel} (${(fileSize / (1024 * 1024)).toFixed(1)} MB via ${usedHoster}).`,
+        message: `Gespeichert unter ${locationLabel} (${(fileSize / (1024 * 1024)).toFixed(1)} MB via ${usedHoster})${fellBackToLocal ? ' · Google Drive nicht verbunden, lokal gesichert' : ''}.`,
         seriesId: job.seriesId,
         seriesTitle: job.seriesTitle,
         season: job.season,
@@ -918,10 +1133,27 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
     try {
       for (;;) {
         const cfg = store.getConfig()
-        if (!cfg.enabled) break
         const now = Date.now()
         const bwState = resolveEffectiveBandwidthKbps(cfg, now)
-        if (!bwState.allowed) break
+
+        let wokeAny = false
+        const currentQueue = store.getQueue()
+        for (const item of currentQueue) {
+          if (
+            (item.status === 'retrying' || item.status === 'waiting_language') &&
+            item.nextRetryAt &&
+            item.nextRetryAt <= now
+          ) {
+            store.patchQueueItem(item.id, { status: 'queued', nextRetryAt: null })
+            wokeAny = true
+          }
+        }
+        const refreshed = wokeAny ? store.getQueue() : currentQueue
+        const hasForced = refreshed.some(
+          (item) => item.status === 'queued' && item.manualForce && !activeControllers.has(item.id),
+        )
+
+        if ((!cfg.enabled || !bwState.allowed) && !hasForced) break
 
         if (cfg.pauseOnLowSpace && Number(cfg.minFreeLocalGb) > 0) {
           const freeBytes = getLocalFreeBytes(cfg.tempDir)
@@ -947,25 +1179,12 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
         }
 
         const concurrency = Math.max(1, Math.min(4, Number(cfg.concurrency) || 1))
-
-        let wokeAny = false
-        const currentQueue = store.getQueue()
-        for (const item of currentQueue) {
-          if (
-            (item.status === 'retrying' || item.status === 'waiting_language') &&
-            item.nextRetryAt &&
-            item.nextRetryAt <= now
-          ) {
-            store.patchQueueItem(item.id, { status: 'queued', nextRetryAt: null })
-            wokeAny = true
-          }
-        }
-        const refreshed = wokeAny ? store.getQueue() : currentQueue
         const activeCount = activeControllers.size
         if (activeCount >= concurrency) break
 
         const eligible = refreshed.filter((item) => {
           if (item.status !== 'queued' || activeControllers.has(item.id)) return false
+          if ((!cfg.enabled || !bwState.allowed) && !item.manualForce) return false
           if (item.seriesId) {
             const ov = cfg.seriesOverrides?.[item.seriesId]
             const maxGb = Number(ov?.maxStorageGb || 0)
@@ -1037,6 +1256,7 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
       mode: input.mode || null,
       videoPref: input.videoPref || null,
       preferredHoster: input.preferredHoster || null,
+      manualForce: Boolean(input.manualForce),
       isUpgrade: Boolean(input.isUpgrade),
       upgradeFromDriveFileId: input.upgradeFromDriveFileId || null,
       upgradeFromLocalPath: input.upgradeFromLocalPath || null,
@@ -1068,6 +1288,7 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
       jobId,
       {
         status: 'queued',
+        manualForce: true,
         nextRetryAt: null,
         error: null,
         progress: 0,
@@ -1085,7 +1306,16 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
     const next = queue.map((j) => {
       if (j.status === 'failed' || j.status === 'retrying' || j.status === 'cancelled' || j.status === 'waiting_language') {
         count += 1
-        return { ...j, status: 'queued', attempts: 0, nextRetryAt: null, error: null, progress: 0, updatedAt: Date.now() }
+        return {
+          ...j,
+          status: 'queued',
+          manualForce: true,
+          attempts: 0,
+          nextRetryAt: null,
+          error: null,
+          progress: 0,
+          updatedAt: Date.now(),
+        }
       }
       return j
     })

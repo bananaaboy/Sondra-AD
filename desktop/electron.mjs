@@ -15,11 +15,10 @@ import {
   shell,
   Tray,
 } from 'electron'
-import electronUpdater from 'electron-updater'
 import { createEngineServer } from '../engine/httpServer.mjs'
 import { buildTrayIconPng } from './trayIcon.mjs'
+import { setupUpdates } from './updater.mjs'
 
-const { autoUpdater } = electronUpdater
 const IN_STORE = process.windowsStore === true
 const PORTABLE_EXE_DIR = IN_STORE ? null : (process.env.PORTABLE_EXECUTABLE_DIR ?? null)
 const PORTABLE_EXE_FILE = IN_STORE ? null : (process.env.PORTABLE_EXECUTABLE_FILE ?? null)
@@ -226,20 +225,20 @@ function rebuildTrayMenu() {
       },
     },
     { type: 'separator' },
-    ...(AUTO_UPDATE_SUPPORTED
+    ...(updater && updater.getState().status !== 'off'
       ? [
-          updateState.status === 'downloaded'
+          updater.getState().status === 'ready'
             ? {
-                label: `Update v${updateState.availableVersion || ''} installieren & neu starten`,
+                label: `Auf ${updater.getState().next || ''} aktualisieren`,
                 click: () => {
                   isQuitting = true
-                  autoUpdater.quitAndInstall(false, true)
+                  updater.installNow()
                 },
               }
             : {
                 label: 'Nach Updates suchen',
                 click: () => {
-                  void autoUpdater.checkForUpdates().catch(() => {})
+                  updater.checkNow()
                 },
               },
         ]
@@ -312,90 +311,7 @@ ipcMain.handle('sondra-ad:set-autostart', (_event, enabled) => {
   return flag
 })
 
-const AUTO_UPDATE_SUPPORTED = Boolean(app.isPackaged && !IN_STORE && !PORTABLE_EXE_DIR && !SMOKE)
-
-let updateState = {
-  supported: AUTO_UPDATE_SUPPORTED,
-  status: 'idle',
-  currentVersion: app.getVersion(),
-  availableVersion: null,
-  progress: 0,
-  error: null,
-}
-
-function broadcastUpdateState(patch = {}) {
-  updateState = { ...updateState, ...patch, currentVersion: app.getVersion() }
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    try {
-      mainWindow.webContents.send('sondra-ad:update-state', updateState)
-    } catch {}
-  }
-  scheduleTrayRebuild()
-}
-
-function setupAutoUpdater() {
-  if (!AUTO_UPDATE_SUPPORTED) return
-  autoUpdater.autoDownload = true
-  autoUpdater.autoInstallOnAppQuit = true
-  autoUpdater.logger = {
-    info: (m) => writeLog(`Updater: ${m}`),
-    warn: (m) => writeLog(`Updater (Warnung): ${m}`),
-    error: (m) => writeLog(`Updater (Fehler): ${m}`),
-    debug: () => {},
-  }
-  autoUpdater.on('checking-for-update', () => {
-    broadcastUpdateState({ status: 'checking', error: null })
-  })
-  autoUpdater.on('update-available', (info) => {
-    broadcastUpdateState({ status: 'available', availableVersion: info?.version || null, progress: 0, error: null })
-  })
-  autoUpdater.on('update-not-available', () => {
-    broadcastUpdateState({ status: 'up_to_date', availableVersion: null, progress: 0, error: null })
-  })
-  autoUpdater.on('download-progress', (p) => {
-    broadcastUpdateState({ status: 'downloading', progress: Math.round(p?.percent || 0), error: null })
-  })
-  autoUpdater.on('update-downloaded', (info) => {
-    broadcastUpdateState({ status: 'downloaded', availableVersion: info?.version || null, progress: 100, error: null })
-    if (Notification.isSupported()) {
-      try {
-        new Notification({
-          title: `Sondra AD v${info?.version || ''} bereit`,
-          body: 'Das Update wurde geladen und wird beim nächsten Neustart installiert.',
-        }).show()
-      } catch {}
-    }
-  })
-  autoUpdater.on('error', (err) => {
-    broadcastUpdateState({ status: 'error', error: String(err?.message ?? err).slice(0, 240) })
-  })
-
-  setTimeout(() => {
-    void autoUpdater.checkForUpdates().catch(() => {})
-  }, 15_000).unref?.()
-  setInterval(() => {
-    void autoUpdater.checkForUpdates().catch(() => {})
-  }, 6 * 60 * 60_000).unref?.()
-}
-
-ipcMain.handle('sondra-ad:get-update-state', () => updateState)
-
-ipcMain.handle('sondra-ad:check-updates', async () => {
-  if (!AUTO_UPDATE_SUPPORTED) return updateState
-  try {
-    await autoUpdater.checkForUpdates()
-  } catch (err) {
-    broadcastUpdateState({ status: 'error', error: String(err?.message ?? err).slice(0, 240) })
-  }
-  return updateState
-})
-
-ipcMain.handle('sondra-ad:install-update', () => {
-  if (!AUTO_UPDATE_SUPPORTED || updateState.status !== 'downloaded') return false
-  isQuitting = true
-  autoUpdater.quitAndInstall(false, true)
-  return true
-})
+let updater = null
 
 app.on('second-instance', () => {
   writeLog('Zweiter Start erkannt: bringe Fenster nach vorn.')
@@ -462,8 +378,20 @@ async function boot() {
   }
   updatePowerSaveBlocker(Boolean(initialCfg.preventSuspend && initialCfg.enabled))
 
+  updater = setupUpdates({
+    log: writeLog,
+    ipcMain,
+    window: () => mainWindow,
+    version: app.getVersion(),
+    enabled: Boolean(app.isPackaged && process.platform === 'win32' && !IN_STORE && !SMOKE),
+    channel: IN_STORE ? 'store' : PORTABLE_EXE_DIR ? 'portable' : 'setup',
+    onState: (next) => {
+      if (next.status === 'ready') isQuitting = false
+      scheduleTrayRebuild()
+    },
+  })
+
   setupTray()
-  setupAutoUpdater()
 
   mainWindow = new BrowserWindow({
     title: 'Sondra AD',

@@ -389,6 +389,71 @@ export async function createEngineServer({
           return sendJson(res, 200, { ok: true, queue: store.getQueue() })
         }
 
+        if (route === 'history/remove' && req.method === 'POST') {
+          if (body.key) {
+            store.removeDownloadHistoryEntry(String(body.key))
+          }
+          if (body.jobId) {
+            worker.removeJob(String(body.jobId))
+          }
+          return sendJson(res, 200, {
+            ok: true,
+            episodeIndex: store.getEpisodeIndex(),
+            queue: store.getQueue(),
+          })
+        }
+
+        if (route === 'history/clear' && req.method === 'POST') {
+          worker.clearCompletedJobs()
+          if (body.clearEpisodeIndex !== false) {
+            store.clearDownloadHistory()
+          }
+          return sendJson(res, 200, {
+            ok: true,
+            episodeIndex: store.getEpisodeIndex(),
+            queue: store.getQueue(),
+          })
+        }
+
+        if (route === 'watch-history/remove' && req.method === 'POST') {
+          const now = Date.now()
+          if (body.clearAll) {
+            const next = store.getMerkItems().map((item) =>
+              Array.isArray(item.history) && item.history.length > 0
+                ? { ...item, history: [], updatedAt: now }
+                : item,
+            )
+            store.saveMerkliste(next)
+          } else {
+            const sid = String(body.seriesId || '')
+            const eid = String(body.entryId || '')
+            const next = store.getMerkItems().map((item) => {
+              if (item.id !== sid) return item
+              const target = (item.history || []).find((h) => h.id === eid)
+              const nextHistory = (item.history || []).filter((h) => h.id !== eid)
+              let nextSeasons = item.seasons
+              if (body.undoWatched && target && Array.isArray(item.seasons)) {
+                nextSeasons = item.seasons.map((s) =>
+                  s.number === target.season
+                    ? { ...s, watched: (s.watched || []).filter((ep) => ep !== target.episode) }
+                    : s,
+                )
+              }
+              return {
+                ...item,
+                history: nextHistory,
+                ...(nextSeasons ? { seasons: nextSeasons } : {}),
+                updatedAt: now,
+              }
+            })
+            store.saveMerkliste(next)
+          }
+          if (driveAuth.isConnected()) {
+            void driveService.pushMerkliste().catch(() => {})
+          }
+          return sendJson(res, 200, { ok: true, merkItems: store.getMerkItems() })
+        }
+
         if (route === 'storage' && req.method === 'GET') {
           const info = await driveService.inspectStorage()
           return sendJson(res, 200, { ok: true, storage: info, episodeIndex: store.getEpisodeIndex() })
@@ -413,6 +478,11 @@ export async function createEngineServer({
         }
 
         if (route === 'logs' && req.method === 'GET') {
+          return sendJson(res, 200, { ok: true, logs: store.getLogs(1000) })
+        }
+
+        if (route === 'logs/remove' && req.method === 'POST') {
+          store.removeLog(String(body.id || ''))
           return sendJson(res, 200, { ok: true, logs: store.getLogs(1000) })
         }
 

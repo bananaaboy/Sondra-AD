@@ -346,13 +346,14 @@ export interface StorageReport {
   }
 }
 
-export interface AppUpdateState {
-  supported: boolean
-  status: 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'up_to_date' | 'error'
-  currentVersion: string
-  availableVersion: string | null
-  progress: number
-  error: string | null
+export interface UpdateState {
+  status: 'off' | 'idle' | 'checking' | 'current' | 'downloading' | 'ready' | 'available' | 'error'
+  version: string
+  channel?: 'setup' | 'portable' | 'store'
+  next?: string
+  percent?: number
+  download?: string
+  message?: string
 }
 
 declare global {
@@ -364,10 +365,10 @@ declare global {
       hideToTray: () => Promise<boolean>
       getAutostartState: () => Promise<boolean>
       setAutostartState: (enabled: boolean) => Promise<boolean>
-      getUpdateState?: () => Promise<AppUpdateState>
-      checkForUpdates?: () => Promise<AppUpdateState>
+      updateState?: () => Promise<UpdateState>
+      checkForUpdates?: () => Promise<UpdateState>
       installUpdate?: () => Promise<boolean>
-      onUpdateState?: (cb: (state: AppUpdateState) => void) => () => void
+      onUpdate?: (cb: (state: UpdateState) => void) => () => void
     }
   }
 }

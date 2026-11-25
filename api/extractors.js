@@ -6,11 +6,11 @@ import { Readable } from "node:stream";
 import tls from "node:tls";
 import { resolveYoutube } from "./_shared.js";
 const DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
-const ANIWORLD_HOSTS = /^(?:[a-z0-9-]+\.)*(?:aniworld\.(?:to|la)|s\.to|serienstream\.(?:to|sx))$/i;
-const VOE_HOSTS = /(?:^|\.)(?:voe\.sx|tube\.sx|jamesbornmain\.com|chaliceguzzlerlandlord\.com|jeremyparticipantanything\.com|voe-network\.net|repackcloud\.com|playercdn\.net|launchingforgive\.com|youdadad\.com|generousscoundrel\.com|bigtitssexy\.com|greenteabear\.com|jilliandietrich\.com|leonaheavens\.com|tuktukstream\.com|stephaniecorneliussen\.net)$/i;
-const FILEMOON_HOSTS = /(?:^|\.)(?:filemoon\.(?:sx|to|in|nl|wf|top|me)|kerapoxy\.cc|moonmov\.pro|moonplayer\.net|embedmoon\.xyz)$/i;
-const VIDMOLY_HOSTS = /(?:^|\.)(?:vidmoly\.(?:to|me|net|in|org))$/i;
-const DOOD_HOSTS = /(?:^|\.)(?:dood\.(?:to|so|ws|wf|re|pm|la|li|watch|cx|yt|stream)|doodstream\.(?:com|co)|dsvplay\.com|myvidplay\.com|playmogo\.com|d0o0d\.com|dooood\.com|ds2play\.com)$/i;
+const ANIWORLD_HOSTS = /^(?:(?:[a-z0-9-]+\.)*(?:aniworld\.(?:to|la)|s\.to|serienstream\.(?:to|sx))|186\.2\.175\.5)$/i;
+const VOE_HOSTS = /(?:^|\.)(?:voe\.sx|tube\.sx|jamesbornmain\.com|chaliceguzzlerlandlord\.com|jeremyparticipantanything\.com|voe-network\.net|repackcloud\.com|playercdn\.net|launchingforgive\.com|youdadad\.com|generousscoundrel\.com|bigtitssexy\.com|greenteabear\.com|jilliandietrich\.com|leonaheavens\.com|tuktukstream\.com|stephaniecorneliussen\.net|diananatureforeign\.com|richardsignfish\.com|robertordercharacter\.com|alejandrocenturyoil\.com)$/i;
+const FILEMOON_HOSTS = /(?:^|\.)(?:filemoon\.(?:sx|to|in|nl|wf|top|me)|kerapoxy\.cc|moonmov\.pro|moonplayer\.net|embedmoon\.xyz|bysebuho\.com|ico3c\.com|f16px\.com|1azayf9w\.xyz)$/i;
+const VIDMOLY_HOSTS = /(?:^|\.)(?:vidmoly\.(?:to|me|net|in|org|biz))$/i;
+const DOOD_HOSTS = /(?:^|\.)(?:dood\.(?:to|so|ws|wf|re|pm|la|li|watch|cx|yt|stream)|doodstream\.(?:com|co)|dsvplay\.com|myvidplay\.com|playmogo\.com|d0o0d\.com|dooood\.com|ds2play\.com|doply\.net|vide0\.net)$/i;
 const STREAMTAPE_HOSTS = /(?:^|\.)(?:streamtape\.(?:com|net|to|xyz)|streamta\.pe|streamadblocker\.com)$/i;
 const VIDOZA_HOSTS = /(?:^|\.)(?:vidoza\.(?:net|org|co))$/i;
 const BILIBILI_HOSTS = /(?:^|\.)(?:bilibili\.com|b23\.tv)$/i;
@@ -550,20 +550,25 @@ async function extractFilemoon(url, options = {}) {
         if (!res.ok)
             return null;
         let html = await res.text();
-        const iframeMatch = html.match(/<iframe\b[^>]*\bsrc\s*=\s*['"]([^'"]+)['"]/i);
-        if (iframeMatch && iframeMatch[1] && !iframeMatch[1].includes("about:blank")) {
+        for (let hop = 0; hop < 3; hop += 1) {
+            const iframeMatch = html.match(/<iframe\b[^>]*\bsrc\s*=\s*['"]([^'"]+)['"]/i);
+            if (!iframeMatch || !iframeMatch[1] || iframeMatch[1].includes("about:blank"))
+                break;
             try {
                 const iframeUrl = new URL(iframeMatch[1], currentUrl).href;
+                if (iframeUrl === currentUrl)
+                    break;
                 const iframeRes = await fetchHtml(iframeUrl, {
                     ...options,
                     headers: { ...options.headers, Referer: currentUrl }
                 });
-                if (iframeRes.ok) {
-                    html = await iframeRes.text();
-                    currentUrl = iframeUrl;
-                }
+                if (!iframeRes.ok)
+                    break;
+                html = await iframeRes.text();
+                currentUrl = iframeUrl;
             }
             catch {
+                break;
             }
         }
         const parsed = new URL(currentUrl);
@@ -1034,18 +1039,6 @@ async function extractAniworld(url, options = {}) {
         return extractAniworldSeason(url, options);
     }
     try {
-        let scoreEntry = function (entry) {
-            const hostIdx = hosterPriority.findIndex((h) => entry.hosterName.toLowerCase().includes(h));
-            const hostScore = hostIdx >= 0 ? 100 - hostIdx * 10 : 0;
-            let langScore = 0;
-            if (preferredLangKey !== null) {
-                langScore = entry.langKey === preferredLangKey ? 500 : 0;
-            }
-            else {
-                langScore = entry.langKey === 3 ? 30 : entry.langKey === 1 ? 25 : 15;
-            }
-            return hostScore + langScore;
-        };
         const res = await fetchHtml(url, options);
         if (!res.ok)
             return null;
@@ -1113,6 +1106,25 @@ async function extractAniworld(url, options = {}) {
             : defaultPriority;
         const maxMirrors = Math.max(1, Number(options.maxMirrors) || 6);
         const preferredLangKey = parseAniworldLanguage(options.language || options.preferredLanguage || options.langKey);
+        const priorityLangKeys = Array.isArray(options.languagePriority)
+            ? options.languagePriority.map((l) => parseAniworldLanguage(l)).filter((k) => k !== null)
+            : [];
+        const scoreEntry = (entry) => {
+            const hostIdx = hosterPriority.findIndex((h) => entry.hosterName.toLowerCase().includes(h));
+            const hostScore = hostIdx >= 0 ? 100 - hostIdx * 10 : 0;
+            let langScore = 0;
+            if (preferredLangKey !== null) {
+                langScore = entry.langKey === preferredLangKey ? 600 : 0;
+            }
+            else if (priorityLangKeys.length > 0) {
+                const pIdx = priorityLangKeys.indexOf(entry.langKey);
+                langScore = pIdx >= 0 ? 500 - pIdx * 150 : 10;
+            }
+            else {
+                langScore = entry.langKey === 3 ? 30 : entry.langKey === 1 ? 25 : 15;
+            }
+            return hostScore + langScore;
+        };
         const availableLangKeys = [...new Set(hosterEntries.map((e) => e.langKey))];
         const availableLanguages = availableLangKeys.map((key) => ({
             key,
@@ -1143,7 +1155,7 @@ async function extractAniworld(url, options = {}) {
             const embedUrl = await resolveAniworldRedirect(entry.redirectUrl, url, options);
             if (!embedUrl)
                 continue;
-            const direct = await extractDirectHoster(embedUrl, options);
+            const direct = await extractDirectHoster(embedUrl, { ...options, hosterHint: entry.hosterName });
             if (direct && direct.url) {
                 seenCombos.add(comboKey);
                 resolvedStreams.push({
@@ -1153,9 +1165,10 @@ async function extractAniworld(url, options = {}) {
                     language: entry.langLabel,
                     langKey: entry.langKey,
                     url: direct.url,
+                    embedUrl,
                     isHls: direct.isHls,
                     referer: direct.referer,
-                    ext: direct.isHls ? "mp4" : direct.url.includes(".mp4") ? "mp4" : "m4a"
+                    ext: direct.ext || "mp4"
                 });
                 if (resolvedStreams.length >= maxMirrors)
                     break;
@@ -1165,6 +1178,7 @@ async function extractAniworld(url, options = {}) {
             return null;
         const primary = resolvedStreams[0];
         const langTag = primary.langKey === 3 ? "Ger-Sub" : primary.langKey === 1 ? "Ger-Dub" : primary.langKey === 2 ? "Eng-Sub" : primary.language;
+        const selectedLanguage = primary.langKey === 1 ? "ger_dub" : primary.langKey === 3 ? "ger_sub" : primary.langKey === 2 ? "eng_sub" : null;
         const finalCompoundTitle = options.language || options.preferredLanguage || options.langKey ? `${compoundTitle} [${langTag}]` : compoundTitle;
         return {
             title: finalCompoundTitle,
@@ -1177,6 +1191,7 @@ async function extractAniworld(url, options = {}) {
             hoster: primary.provider,
             language: primary.language,
             langKey: primary.langKey,
+            selectedLanguage,
             preferredLanguageAvailable,
             availableLanguages,
             streams: resolvedStreams,
@@ -1188,56 +1203,38 @@ async function extractAniworld(url, options = {}) {
     }
 }
 async function extractDirectHoster(rawUrl, options = {}) {
-    if (isFilemoonUrl(rawUrl)) {
-        const res = await extractFilemoon(rawUrl, options);
-        if (res)
-            return res;
+    const hint = String(options.hosterHint || "").toLowerCase();
+    const extractors = [
+        { key: "filemoon", match: () => hint.includes("filemoon") || isFilemoonUrl(rawUrl), fn: extractFilemoon },
+        { key: "voe", match: () => hint.includes("voe") || (!hint && isVoeUrl(rawUrl)), fn: extractVoe },
+        { key: "vidmoly", match: () => hint.includes("vidmoly") || isVidmolyUrl(rawUrl), fn: extractVidmoly },
+        { key: "streamtape", match: () => hint.includes("streamtape") || isStreamtapeUrl(rawUrl), fn: extractStreamtape },
+        { key: "vidoza", match: () => hint.includes("vidoza") || isVidozaUrl(rawUrl), fn: extractVidoza },
+        { key: "dood", match: () => hint.includes("dood") || isDoodstreamUrl(rawUrl), fn: extractDoodstream }
+    ];
+    const tried = new Set();
+    for (const item of extractors) {
+        if (!item.match())
+            continue;
+        tried.add(item.key);
+        try {
+            const res = await item.fn(rawUrl, options);
+            if (res)
+                return res;
+        }
+        catch {
+        }
     }
-    if (isStreamtapeUrl(rawUrl)) {
-        const res = await extractStreamtape(rawUrl, options);
-        if (res)
-            return res;
-    }
-    if (isVidmolyUrl(rawUrl)) {
-        const res = await extractVidmoly(rawUrl, options);
-        if (res)
-            return res;
-    }
-    if (isVidozaUrl(rawUrl)) {
-        const res = await extractVidoza(rawUrl, options);
-        if (res)
-            return res;
-    }
-    if (isDoodstreamUrl(rawUrl)) {
-        const res = await extractDoodstream(rawUrl, options);
-        if (res)
-            return res;
-    }
-    if (isVoeUrl(rawUrl)) {
-        const res = await extractVoe(rawUrl, options);
-        if (res)
-            return res;
-    }
-    try {
-        const voeAttempt = await extractVoe(rawUrl, options);
-        if (voeAttempt)
-            return voeAttempt;
-    }
-    catch {
-    }
-    try {
-        const fmAttempt = await extractFilemoon(rawUrl, options);
-        if (fmAttempt)
-            return fmAttempt;
-    }
-    catch {
-    }
-    try {
-        const stAttempt = await extractStreamtape(rawUrl, options);
-        if (stAttempt)
-            return stAttempt;
-    }
-    catch {
+    for (const item of extractors) {
+        if (tried.has(item.key))
+            continue;
+        try {
+            const res = await item.fn(rawUrl, options);
+            if (res)
+                return res;
+        }
+        catch {
+        }
     }
     return null;
 }

@@ -1,0 +1,60 @@
+{
+  "versions": [
+    {
+      "version": "1.0.6",
+      "date": "2026-11-25",
+      "items": [
+        "Auto-Updater und „Was ist neu“ erscheinen jetzt genau wie in Sondra: der Update-Knopf steht oben in der Kopfleiste (mit Status, Ladefortschritt in Prozent, Portable-Hinweis und direktem Neustart), nach einem Update erscheint einmalig die Hinweiszeile „Neu in 1.0.6 …“, und ein Klick auf die Version öffnet „Was ist neu“.",
+        "Downloader überarbeitet: Ist Google Drive noch nicht verbunden, speichert Sondra AD geladene Folgen automatisch lokal unter Downloads/Sondra-AD statt den Download abzubrechen. Manuell eingereihte Links und Sofort-Wiederholungen starten sofort, auch wenn die Hintergrund-Überwachung pausiert ist.",
+        "HLS- und Hoster-Downloads laufen jetzt auch auf Windows-Rechnern ohne vorinstalliertes FFmpeg zuverlässig: inklusive AES-128-Entschlüsselung, fMP4-Initialisierungssegmenten (#EXT-X-MAP), Origin/Referer-Headern, yt-dlp-Fallback ohne FFmpeg-Zwang sowie direkter Hoster-Zuordnung bei neuen Mirror-Domains.",
+        "Verlauf überall löschbar: Sowohl der Download-Verlauf (in Warteschlange und Übersicht), der Schau-Verlauf in der Merkliste als auch das Protokoll lassen sich einzeln pro Eintrag oder komplett über „Verlauf leeren“ löschen."
+      ]
+    },
+    {
+      "version": "1.0.5",
+      "date": "2026-11-25",
+      "items": [
+        "Warteschlangen-Trigger „Danach herunterfahren“ direkt in der Warteschlange und im System-Tray.",
+        "Download-Zeitfenster / Nachtmodus: nachts volle Leitung, tagsüber wahlweise Bandbreite drosseln oder Downloads pausieren.",
+        "Ausstrahlungs-Wochenplan in der Merkliste (Liste | Wochenplan) mit einstellbarem Wochentag je Serie.",
+        "Handy-Push-Benachrichtigungen über Telegram, ntfy und Pushover zusätzlich zu Discord, inklusive Test-Meldung.",
+        "Speicherbudget pro Serie (GB), Sprach-Prioritätsliste mit Auto-Upgrade sowie alternative Speicherziele (NAS/SMB, WebDAV und Jellyfin/Plex-Ordnerstruktur)."
+      ]
+    },
+    {
+      "version": "1.0.4",
+      "date": "2026-11-25",
+      "items": [
+        "Geplantes Herunterfahren, Energiesparmodus oder Ruhezustand zu einer wählbaren Uhrzeit mit optionaler Wartezeit auf laufende Übertragungen und abbrechbarem 60-Sekunden-Countdown."
+      ]
+    },
+    {
+      "version": "1.0.3",
+      "date": "2026-11-25",
+      "items": [
+        "QR-Code-Anmeldung entfernt und durch ein verschlüsseltes Kopplungspaket („Mit anderem Gerät koppeln“) ersetzt."
+      ]
+    },
+    {
+      "version": "1.0.2",
+      "date": "2026-11-25",
+      "items": [
+        "Staffel-spezifische Download-Regeln pro Serie (ein/aus, ab/bis Folge, Maximalanzahl), „Alle abbrechen“ in der Warteschlange und aufgeräumte Einstellungen in vier Reitern."
+      ]
+    },
+    {
+      "version": "1.0.1",
+      "date": "2026-11-25",
+      "items": [
+        "Google-Drive-Anmeldung auf RFC-8252-Loopback mit PKCE und eingebetteter Desktop-Konfiguration umgestellt."
+      ]
+    },
+    {
+      "version": "1.0.0",
+      "date": "2026-11-24",
+      "items": [
+        "Erste Veröffentlichung von Sondra AD als automatischer Hintergrund-Downloader für die gemeinsame Sondra-Merkliste."
+      ]
+    }
+  ]
+}

@@ -104,6 +104,7 @@ export function createMediaTools({ dataDir, store, fetchImpl = fetch }) {
       const local = process.env.LOCALAPPDATA || ''
       list.push(
         path.join(local, 'Microsoft', 'WinGet', 'Links', 'yt-dlp.exe'),
+        path.join(local, 'Microsoft', 'WinGet', 'Packages', 'yt-dlp.yt-dlp_Microsoft.Winget.Source_8wekyb3d8bbwe', 'yt-dlp.exe'),
         path.join(local, 'Microsoft', 'WindowsApps', 'yt-dlp.exe'),
       )
     }
@@ -203,15 +204,32 @@ export function createMediaTools({ dataDir, store, fetchImpl = fetch }) {
   function findFfmpeg() {
     if (cachedFfmpeg !== undefined) return cachedFfmpeg
     const exe = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
+    const winExtra = []
+    if (process.platform === 'win32') {
+      const local = process.env.LOCALAPPDATA || ''
+      winExtra.push(
+        path.join(local, 'Microsoft', 'WinGet', 'Links', 'ffmpeg.exe'),
+        path.join(local, 'Microsoft', 'WindowsApps', 'ffmpeg.exe'),
+        path.join(process.env.ProgramFiles || 'C:\\Program Files', 'ffmpeg', 'bin', 'ffmpeg.exe'),
+      )
+      const wingetPkgs = path.join(local, 'Microsoft', 'WinGet', 'Packages')
+      try {
+        if (fs.existsSync(wingetPkgs)) {
+          for (const pkg of fs.readdirSync(wingetPkgs)) {
+            if (!/ffmpeg/i.test(pkg)) continue
+            const pkgDir = path.join(wingetPkgs, pkg)
+            for (const sub of fs.readdirSync(pkgDir)) {
+              const candidate = path.join(pkgDir, sub, 'bin', 'ffmpeg.exe')
+              if (fs.existsSync(candidate)) winExtra.push(candidate)
+            }
+          }
+        }
+      } catch {}
+    }
     const candidates = [
       process.env.SONDRA_FFMPEG,
       path.join(dataDir, 'bin', exe),
-      ...(process.platform === 'win32'
-        ? [
-            path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'WinGet', 'Links', 'ffmpeg.exe'),
-            path.join(process.env.ProgramFiles || 'C:\\Program Files', 'ffmpeg', 'bin', 'ffmpeg.exe'),
-          ]
-        : []),
+      ...winExtra,
       exe,
     ].filter(Boolean)
 
@@ -305,6 +323,7 @@ export function createMediaTools({ dataDir, store, fetchImpl = fetch }) {
     videoPref = 'best',
     audioFormat = 'mp3',
     referer = null,
+    maxBandwidthKbps = null,
     onProgress = null,
     signal = undefined,
   }) {
@@ -324,43 +343,65 @@ export function createMediaTools({ dataDir, store, fetchImpl = fetch }) {
               ? 360
               : 0
 
-    let formatExpr = 'bv*[vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b'
+    let formatExpr
     if (mode === 'audio') {
       formatExpr = 'ba[ext=m4a]/ba/b'
-    } else if (maxHeight > 0) {
-      formatExpr = `bv*[height<=${maxHeight}][vcodec^=avc1]+ba[ext=m4a]/b[height<=${maxHeight}][ext=mp4]/bv*[height<=${maxHeight}]+ba/b[height<=${maxHeight}]/b`
-    }
-
-    const args = [
-      '--newline',
-      '--no-playlist',
-      '--no-warnings',
-      ...(bind ? ['--source-address', bind, '--force-ipv4'] : ['--force-ipv4']),
-      '--user-agent',
-      DEFAULT_USER_AGENT,
-      '--socket-timeout',
-      '25',
-      '--retries',
-      '3',
-      '--fragment-retries',
-      '3',
-      ...(referer ? ['--referer', referer] : []),
-      ...(cfg.maxBandwidthKbps > 0 ? ['--limit-rate', `${cfg.maxBandwidthKbps}K`] : []),
-      ...(ffmpegBin && ffmpegBin !== 'ffmpeg' && ffmpegBin !== 'ffmpeg.exe' ? ['--ffmpeg-location', ffmpegBin] : []),
-      ...buildCookieArgs(cfg),
-      '-f',
-      formatExpr,
-    ]
-
-    if (mode === 'audio') {
-      if (ffmpegBin && audioFormat && audioFormat !== 'original') {
-        args.push('-x', '--audio-format', audioFormat === 'm4a' ? 'm4a' : audioFormat)
-      }
     } else if (ffmpegBin) {
-      args.push('--merge-output-format', 'mp4')
+      formatExpr =
+        maxHeight > 0
+          ? `bv*[height<=${maxHeight}][vcodec^=avc1]+ba[ext=m4a]/b[height<=${maxHeight}][ext=mp4]/bv*[height<=${maxHeight}]+ba/b[height<=${maxHeight}]/b`
+          : 'bv*[vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b'
+    } else {
+      formatExpr =
+        maxHeight > 0
+          ? `b[height<=${maxHeight}][ext=mp4]/b[height<=${maxHeight}]/b[ext=mp4]/b`
+          : 'b[ext=mp4]/b'
     }
 
-    args.push('-o', `${outputPathNoExt}.%(ext)s`, '--', url)
+    let refererOrigin = null
+    if (referer) {
+      try {
+        refererOrigin = new URL(referer).origin
+      } catch {}
+    }
+
+    const rateLimit = maxBandwidthKbps !== null ? Number(maxBandwidthKbps) || 0 : Number(cfg.maxBandwidthKbps) || 0
+
+    const buildArgs = (includeCookies) => {
+      const args = [
+        '--newline',
+        '--no-playlist',
+        '--no-warnings',
+        '--no-check-certificates',
+        ...(bind ? ['--source-address', bind, '--force-ipv4'] : ['--force-ipv4']),
+        '--user-agent',
+        DEFAULT_USER_AGENT,
+        '--socket-timeout',
+        '25',
+        '--retries',
+        '4',
+        '--fragment-retries',
+        '4',
+        ...(referer ? ['--referer', referer] : []),
+        ...(refererOrigin ? ['--add-header', `Origin:${refererOrigin}`] : []),
+        ...(rateLimit > 0 ? ['--limit-rate', `${rateLimit}K`] : []),
+        ...(ffmpegBin && ffmpegBin !== 'ffmpeg' && ffmpegBin !== 'ffmpeg.exe' ? ['--ffmpeg-location', ffmpegBin] : []),
+        ...(includeCookies ? buildCookieArgs(cfg) : []),
+        '-f',
+        formatExpr,
+      ]
+
+      if (mode === 'audio') {
+        if (ffmpegBin && audioFormat && audioFormat !== 'original') {
+          args.push('-x', '--audio-format', audioFormat === 'm4a' ? 'm4a' : audioFormat)
+        }
+      } else if (ffmpegBin) {
+        args.push('--merge-output-format', 'mp4')
+      }
+
+      args.push('-o', `${outputPathNoExt}.%(ext)s`, '--', url)
+      return args
+    }
 
     const parseLine = (line) => {
       const m = line.match(/\[download\]\s+(\d+(?:\.\d+)?)%\s+of\s+~?\s*([\d.]+)([KMGTP]?i?B)(?:\s+at\s+([\d.]+)([KMGTP]?i?B)\/s)?(?:\s+ETA\s+(\d+:\d+(?::\d+)?))?/i)
@@ -384,16 +425,34 @@ export function createMediaTools({ dataDir, store, fetchImpl = fetch }) {
       onProgress({ pct, loaded, total, speedBps, etaSeconds })
     }
 
-    const res = await runProcess(tool.bin, args, {
+    let res = await runProcess(tool.bin, buildArgs(true), {
       timeoutMs: 4 * 60 * 60_000,
       signal,
       onStdoutLine: parseLine,
       onStderrLine: parseLine,
     })
 
+    if (
+      res.code !== 0 &&
+      buildCookieArgs(cfg).length > 0 &&
+      /cookie/i.test(res.stderr) &&
+      /could not copy|failed to decrypt|dpapi|could not find|permission denied|unable to open|locked|no such file/i.test(res.stderr)
+    ) {
+      res = await runProcess(tool.bin, buildArgs(false), {
+        timeoutMs: 4 * 60 * 60_000,
+        signal,
+        onStdoutLine: parseLine,
+        onStderrLine: parseLine,
+      })
+    }
+
     if (res.code !== 0) {
-      const errLine = res.stderr.trim().split('\n').pop() || `yt-dlp Fehlercode ${res.code}`
-      throw new Error(errLine.slice(0, 240))
+      const lines = res.stderr.trim().split('\n')
+      const errLine =
+        lines.filter((l) => /error/i.test(l) && !/Traceback|File "|DownloadError:/i.test(l)).pop() ||
+        lines.pop() ||
+        `yt-dlp Fehlercode ${res.code}`
+      throw new Error(errLine.replace(/^ERROR:\s*(?:\[[^\]]+\]\s*)?/, '').slice(0, 240))
     }
 
     const dir = path.dirname(outputPathNoExt)
@@ -413,9 +472,16 @@ export function createMediaTools({ dataDir, store, fetchImpl = fetch }) {
   async function remuxHlsWithFfmpeg({ m3u8Url, referer, outputFile, mode = 'video', audioFormat = 'mp3', signal }) {
     const bin = findFfmpeg()
     if (!bin) return false
+    let originHeader = null
+    if (referer) {
+      try {
+        originHeader = `Origin: ${new URL(referer).origin}`
+      } catch {}
+    }
     const headersArg = [
       `User-Agent: ${DEFAULT_USER_AGENT}`,
       ...(referer ? [`Referer: ${referer}`] : []),
+      ...(originHeader ? [originHeader] : []),
     ].join('\r\n') + '\r\n'
 
     const args = ['-y', '-headers', headersArg, '-i', m3u8Url]

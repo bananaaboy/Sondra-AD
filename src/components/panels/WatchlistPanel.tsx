@@ -45,12 +45,14 @@ export function WatchlistPanel() {
   const upsertSeries = useAppStore((s) => s.upsertSeries)
   const removeSeries = useAppStore((s) => s.removeSeries)
   const setSeriesOverride = useAppStore((s) => s.setSeriesOverride)
+  const removeWatchHistory = useAppStore((s) => s.removeWatchHistory)
 
   const [viewMode, setViewMode] = useState<'list' | 'calendar'>('list')
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | SavedLinkStatus>('all')
   const [syncing, setSyncing] = useState(false)
   const [checkingId, setCheckingId] = useState<string | null>(null)
+  const [historyOpen, setHistoryOpen] = useState(false)
 
   const [addOpen, setAddOpen] = useState(false)
   const [formItem, setFormItem] = useState<{
@@ -86,6 +88,31 @@ export function WatchlistPanel() {
     }
     return map
   }, [episodeIndex])
+
+  const watchHistoryEntries = useMemo(() => {
+    const entries: Array<{
+      seriesId: string
+      seriesTitle: string
+      entryId: string
+      season: number
+      episode: number
+      at: number
+    }> = []
+    for (const item of merkItems) {
+      for (const h of item.history || []) {
+        entries.push({
+          seriesId: item.id,
+          seriesTitle: item.title,
+          entryId: h.id,
+          season: h.season,
+          episode: h.episode,
+          at: h.at,
+        })
+      }
+    }
+    entries.sort((a, b) => b.at - a.at)
+    return entries
+  }, [merkItems])
 
   if (!config) return null
 
@@ -192,6 +219,9 @@ export function WatchlistPanel() {
               Wochenplan
             </button>
           </div>
+          <Button variant="quiet" size="sm" onClick={() => setHistoryOpen(true)}>
+            {watchHistoryEntries.length > 0 ? `Verlauf (${watchHistoryEntries.length})` : 'Verlauf'}
+          </Button>
           {drive?.connected ? (
             <Button variant="quiet" size="sm" disabled={syncing} onClick={() => void handleSync()}>
               {syncing ? 'Gleicht ab …' : 'Mit Drive abgleichen'}
@@ -516,6 +546,68 @@ export function WatchlistPanel() {
             </div>
           </div>
         </form>
+      </Dialog>
+
+      <Dialog
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        title="Zuletzt geschaut (Verlauf)"
+        size="md"
+      >
+        <div className="flex flex-col gap-[16px]">
+          {watchHistoryEntries.length === 0 ? (
+            <p className="py-[12px] text-small text-muted">
+              Noch keine geschauten Folgen im Verlauf hinterlegt.
+            </p>
+          ) : (
+            <ul className="flex max-h-[380px] flex-col overflow-y-auto pr-[4px]">
+              {watchHistoryEntries.map((entry) => (
+                <li
+                  key={`${entry.seriesId}-${entry.entryId}`}
+                  className="flex items-baseline justify-between gap-[12px] border-t border-line py-[10px] first:border-t-0"
+                >
+                  <div className="flex min-w-0 flex-col gap-[2px]">
+                    <span className="truncate text-small font-semibold text-ink">
+                      {entry.seriesTitle} · {episodeLabel(entry.season, entry.episode)}
+                    </span>
+                  </div>
+                  <div className="flex shrink-0 items-baseline gap-[10px]">
+                    <span className="value text-micro text-muted">{formatRelativeTime(entry.at)}</span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void removeWatchHistory({
+                          seriesId: entry.seriesId,
+                          entryId: entry.entryId,
+                        })
+                      }
+                      className="press text-micro text-muted hover:text-ink"
+                    >
+                      Löschen
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="flex flex-wrap items-center justify-between gap-[10px] border-t border-line pt-[14px]">
+            {watchHistoryEntries.length > 0 ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void removeWatchHistory({ clearAll: true })}
+              >
+                Verlauf leeren
+              </Button>
+            ) : (
+              <span />
+            )}
+            <Button variant="quiet" size="sm" onClick={() => setHistoryOpen(false)}>
+              Schließen
+            </Button>
+          </div>
+        </div>
       </Dialog>
 
       {overrideTarget ? (

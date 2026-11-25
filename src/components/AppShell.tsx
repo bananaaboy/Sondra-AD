@@ -1,9 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { APP_VERSION } from '../lib/releaseNotes'
+import { useLayoutEffect, useRef, useState } from 'react'
+import { IN_ELECTRON_APP } from '../lib/downloads'
 import type { ThemeChoice } from '../lib/theme'
 import type { PanelId } from '../types'
 import { useAppStore } from '../state/appStore'
-import { ReleaseNotesDialog } from './ReleaseNotesDialog'
+import { AppUpdateButton } from './AppUpdate'
+import { APP_VERSION, openWhatsNew } from './WhatsNew'
 import { ThemeToggle } from './ThemeToggle'
 import { Badge, Button } from './ui/primitives'
 
@@ -53,6 +54,16 @@ export function Logo({ onClick }: { onClick?: () => void }) {
         <span className="font-wordmark text-[25px] font-light tracking-[-0.01em]">Sondra</span>
         <Badge tone="forest">AD</Badge>
       </button>
+      {IN_ELECTRON_APP ? null : (
+        <button
+          type="button"
+          onClick={openWhatsNew}
+          title="Was ist neu in dieser Version"
+          className="press value rounded-pill border border-line bg-panel-soft px-[7px] py-[1.5px] text-[11px] font-medium tracking-normal text-muted hover:border-rule hover:text-ink max-[419px]:hidden"
+        >
+          v{APP_VERSION}
+        </button>
+      )}
     </h1>
   )
 }
@@ -202,6 +213,7 @@ export function Header({
             </button>
           ) : null}
 
+          <AppUpdateButton />
           <ThemeToggle choice={themeChoice} onChange={onThemeChange} />
         </div>
       </div>
@@ -217,61 +229,34 @@ export function Footer() {
   const runtimeMode = useAppStore((s) => s.runtimeMode)
   const drive = useAppStore((s) => s.drive)
   const tools = useAppStore((s) => s.tools)
-  const [notesOpen, setNotesOpen] = useState(false)
-  const [updateReady, setUpdateReady] = useState<string | null>(null)
-
-  useEffect(() => {
-    let unsub: (() => void) | undefined
-    if (window.sondraAd?.getUpdateState) {
-      void window.sondraAd.getUpdateState().then((st) => {
-        if (st?.status === 'downloaded') setUpdateReady(st.availableVersion || 'neu')
-      })
-    }
-    if (window.sondraAd?.onUpdateState) {
-      unsub = window.sondraAd.onUpdateState((st) => {
-        if (st?.status === 'downloaded') setUpdateReady(st.availableVersion || 'neu')
-      })
-    }
-    return () => unsub?.()
-  }, [])
 
   return (
-    <>
-      <footer className="shell mt-[40px] flex flex-col gap-[10px] border-t border-line py-[24px] text-small text-muted">
-        <div className="flex flex-wrap items-center justify-between gap-[16px]">
-          <p className="max-w-[60ch] leading-[1.6]">
-            Sondra AD · Dauerbetrieb für Laptop und Server ({runtimeMode === 'desktop' ? 'Desktop-App mit System-Tray' : 'Hintergrund-Server'}).
-          </p>
-          <p className="value text-micro text-muted">
-            <button
-              type="button"
-              onClick={() => setNotesOpen(true)}
-              className="text-ink underline underline-offset-[3px] hover:no-underline"
-            >
-              v{APP_VERSION}
-            </button>{' '}
-            · yt-dlp: {tools?.ytdlpAvailable ? tools.ytdlpVersion || 'bereit' : 'wird bei Bedarf geladen'} · FFmpeg:{' '}
-            {tools?.ffmpegAvailable ? (tools.gpuEncoder ? `GPU (${tools.gpuEncoder})` : 'System') : 'Nativ HLS'} ·{' '}
-            {drive?.connected ? 'Google Drive verbunden' : 'Lokal'}
-          </p>
-        </div>
-        <p className="flex flex-wrap items-center gap-x-[16px] gap-y-[4px]">
-          <button
-            type="button"
-            onClick={() => setNotesOpen(true)}
-            className="text-ink underline underline-offset-[3px] hover:no-underline"
-          >
-            {updateReady ? `Update v${updateReady} installieren` : 'Änderungen & Updates'}
-          </button>
-          <a className="text-ink underline underline-offset-[3px] hover:no-underline" href="./datenschutz.html">
-            Datenschutz
-          </a>
-          <a className="text-ink underline underline-offset-[3px] hover:no-underline" href="./lizenz.html">
-            Lizenzen
-          </a>
+    <footer className="shell mt-[40px] flex flex-col gap-[10px] border-t border-line py-[24px] text-small text-muted">
+      <div className="flex flex-wrap items-center justify-between gap-[16px]">
+        <p className="max-w-[60ch] leading-[1.6]">
+          Sondra AD · Dauerbetrieb für Laptop und Server ({runtimeMode === 'desktop' ? 'Desktop-App mit System-Tray' : 'Hintergrund-Server'}).
         </p>
-      </footer>
-      <ReleaseNotesDialog open={notesOpen} onClose={() => setNotesOpen(false)} />
-    </>
+        <p className="value text-micro text-muted">
+          v{APP_VERSION} · yt-dlp: {tools?.ytdlpAvailable ? tools.ytdlpVersion || 'bereit' : 'wird bei Bedarf geladen'} · FFmpeg:{' '}
+          {tools?.ffmpegAvailable ? (tools.gpuEncoder ? `GPU (${tools.gpuEncoder})` : 'System') : 'Nativ HLS'} ·{' '}
+          {drive?.connected ? 'Google Drive verbunden' : 'Lokal'}
+        </p>
+      </div>
+      <p className="flex flex-wrap items-center gap-x-[16px] gap-y-[4px]">
+        <button
+          type="button"
+          onClick={openWhatsNew}
+          className="text-ink underline underline-offset-[3px] hover:no-underline"
+        >
+          Was ist neu in {APP_VERSION}
+        </button>
+        <a className="text-ink underline underline-offset-[3px] hover:no-underline" href="./datenschutz.html">
+          Datenschutz
+        </a>
+        <a className="text-ink underline underline-offset-[3px] hover:no-underline" href="./lizenz.html">
+          Lizenzen
+        </a>
+      </p>
+    </footer>
   )
 }

@@ -1,0 +1,157 @@
+import { useEffect, useState } from 'react'
+import { WINDOWS_SETUP } from '../lib/downloads'
+import type { UpdateState } from '../types'
+
+const BASE = 'press flex items-center gap-[8px] rounded-nav px-[12px] py-[8px] text-small'
+
+function DownloadIcon() {
+  return (
+    <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 shrink-0" fill="none" aria-hidden>
+      <path d="M8 2.5v7.5M4.8 6.8 8 10l3.2-3.2M3 13h10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function RefreshIcon() {
+  return (
+    <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 shrink-0" fill="none" aria-hidden>
+      <path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.5v3h-3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+export function AppUpdateButton() {
+  const bridge = typeof window !== 'undefined' ? window.sondraAd : undefined
+  const [state, setState] = useState<UpdateState | null>(null)
+  const [asked, setAsked] = useState(false)
+
+  useEffect(() => {
+    if (!bridge?.updateState || !bridge?.onUpdate) return
+    void bridge.updateState().then((answer) => {
+      if (answer?.status) setState(answer)
+    })
+    return bridge.onUpdate(setState)
+  }, [bridge])
+
+  useEffect(() => {
+    if (!asked || state?.status !== 'current') return
+    const timer = window.setTimeout(() => setAsked(false), 5000)
+    return () => window.clearTimeout(timer)
+  }, [asked, state?.status])
+
+  if (!bridge || !state) return null
+
+  if (state.status === 'off') {
+    return (
+      <span
+        className="value text-small text-muted"
+        title={
+          state.channel === 'store'
+            ? 'Updates kommen über den Microsoft Store.'
+            : 'Updates gibt es nur in der installierten Windows-App.'
+        }
+      >
+        Version {state.version}
+      </span>
+    )
+  }
+
+  if (state.status === 'ready') {
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          const ok = window.confirm(
+            `Sondra AD startet neu und installiert ${state.next}. Einstellungen, Merkliste und Warteschlange bleiben erhalten. Jetzt aktualisieren?`,
+          )
+          if (ok) void bridge.installUpdate?.()
+        }}
+        className={`${BASE} bg-ink font-semibold text-on-ink hover:bg-ink-hover`}
+        title={`Version ${state.version} → ${state.next}`}
+      >
+        <RefreshIcon />
+        <span className="hidden sm:inline">Auf {state.next} aktualisieren</span>
+        <span className="sm:hidden">Update</span>
+      </button>
+    )
+  }
+
+  if (state.status === 'available' && state.download) {
+    return (
+      <a
+        href={state.download}
+        target="_blank"
+        rel="noreferrer"
+        className={`${BASE} bg-ink font-semibold text-on-ink hover:bg-ink-hover`}
+        title={`Version ${state.version} → ${state.next}. Die neue Datei ersetzt diese; der Ordner „Sondra-AD-Daten“ daneben bleibt.`}
+      >
+        <DownloadIcon />
+        <span className="hidden sm:inline">{state.next} herunterladen</span>
+        <span className="sm:hidden">Update</span>
+      </a>
+    )
+  }
+
+  if (state.status === 'downloading') {
+    return (
+      <span role="status" className={`${BASE} bg-panel-soft text-prose`}>
+        <span className="hidden sm:inline">Update {state.next} wird geladen</span>
+        <span className="sm:hidden">Update</span>
+        <span className="value">{state.percent ?? 0} %</span>
+      </span>
+    )
+  }
+
+  if (state.status === 'error') {
+    return (
+      <span className="flex items-center gap-[4px]" role="status" title={state.message ?? undefined}>
+        <button
+          type="button"
+          onClick={() => {
+            setAsked(true)
+            void bridge.checkForUpdates?.().then(setState)
+          }}
+          className={`${BASE} bg-panel-soft text-ink hover:bg-panel-mid`}
+          aria-label={`Update nicht möglich${state.message ? `: ${state.message}` : ''}. Erneut versuchen`}
+        >
+          <RefreshIcon />
+          <span className="hidden sm:inline">Update nicht möglich · erneut</span>
+          <span className="sm:hidden">Erneut</span>
+        </button>
+        <a
+          href={state.download ?? WINDOWS_SETUP}
+          target="_blank"
+          rel="noreferrer"
+          className="press rounded-nav px-[8px] py-[8px] text-small text-ink underline underline-offset-4 hover:bg-panel-soft"
+        >
+          {state.channel === 'portable' ? 'Neueste laden' : 'Setup laden'}
+        </a>
+      </span>
+    )
+  }
+
+  const label =
+    state.status === 'checking'
+      ? 'Suche Updates …'
+      : asked && state.status === 'current'
+        ? 'Sondra AD ist aktuell'
+        : 'Nach Updates suchen'
+
+  return (
+    <button
+      type="button"
+      disabled={state.status === 'checking'}
+      onClick={() => {
+        setAsked(true)
+        void bridge.checkForUpdates?.().then(setState)
+      }}
+      className={`${BASE} bg-panel-soft text-ink hover:bg-panel-mid disabled:cursor-wait`}
+      title={`Version ${state.version}`}
+      aria-live="polite"
+    >
+      <RefreshIcon />
+      <span className="hidden sm:inline">{label}</span>
+      <span className="value hidden sm:inline text-muted">{state.version}</span>
+    </button>
+  )
+}

@@ -59,7 +59,7 @@ export function defaultConfig(dataDir) {
     autoRetryOnNetworkRestore: true,
 
     cleanupEnabled: true,
-    pauseOnLowSpace: true,
+    pauseOnLowSpace: false,
     maxSondraDriveGb: 0,
     minFreeDriveGb: 2,
     minFreeLocalGb: 5,
@@ -257,6 +257,20 @@ export function createStore(dataDir) {
     return record
   }
 
+  const removeLog = (id) => {
+    const target = String(id || '')
+    const before = logs.length
+    logs = logs.filter((l) => l.id !== target)
+    if (logs.length !== before) {
+      try {
+        writeAtomic(logsFile, logs.length > 0 ? logs.map((l) => JSON.stringify(l)).join('\n') + '\n' : '')
+      } catch {}
+      events.emit('change', { type: 'logs-updated' })
+      return true
+    }
+    return false
+  }
+
   const clearLogs = () => {
     logs = []
     writeAtomic(logsFile, '')
@@ -320,6 +334,21 @@ export function createStore(dataDir) {
     saveEpisodeIndex()
   }
 
+  const removeDownloadHistoryEntry = (key) => {
+    const k = String(key || '')
+    if (!k || !episodeIndex.downloaded[k]) return false
+    delete episodeIndex.downloaded[k]
+    saveEpisodeIndex()
+    return true
+  }
+
+  const clearDownloadHistory = () => {
+    const count = Object.keys(episodeIndex.downloaded).length
+    episodeIndex.downloaded = {}
+    saveEpisodeIndex()
+    return count
+  }
+
   const hasEpisode = (seriesId, season, episode) => {
     const key = episodeKey(seriesId, season, episode)
     return Boolean(episodeIndex.downloaded[key] || episodeIndex.archived[key])
@@ -346,6 +375,7 @@ export function createStore(dataDir) {
     getLogs: (limit = 500) => logs.slice(-limit).reverse(),
     getAllLogs: () => [...logs],
     addLog,
+    removeLog,
     clearLogs,
     getEpisodeIndex: () => ({
       downloaded: { ...episodeIndex.downloaded },
@@ -354,6 +384,8 @@ export function createStore(dataDir) {
     markEpisodeDownloaded,
     markEpisodeArchived,
     unmarkEpisode,
+    removeDownloadHistoryEntry,
+    clearDownloadHistory,
     hasEpisode,
     episodeKey,
   }

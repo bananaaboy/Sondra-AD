@@ -1,20 +1,25 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useAppStore } from '../../state/appStore'
-import { formatBytes, formatEta, formatRelativeTime, formatSpeed } from '../../lib/format'
-import type { QueueJob } from '../../types'
-import { Button, Card, Progress, RowMark, SectionHead, Select, TextInput } from '../ui/primitives'
+import { episodeLabel, formatBytes, formatEta, formatRelativeTime, formatSpeed } from '../../lib/format'
+import type { EpisodeRecord, QueueJob } from '../../types'
+import { Button, Card, Notice, Progress, RowMark, SectionHead, Select, TextInput } from '../ui/primitives'
 
 type QueueFilter = 'all' | 'active' | 'retry' | 'completed'
 
 export function QueuePanel() {
+  const config = useAppStore((s) => s.config)
   const queue = useAppStore((s) => s.queue)
+  const episodeIndex = useAppStore((s) => s.episodeIndex)
+  const merkItems = useAppStore((s) => s.merkItems)
   const addQueueUrl = useAppStore((s) => s.addQueueUrl)
+  const toggleEngine = useAppStore((s) => s.toggleEngine)
   const retryJob = useAppStore((s) => s.retryJob)
   const retryAllFailed = useAppStore((s) => s.retryAllFailed)
   const cancelJob = useAppStore((s) => s.cancelJob)
   const cancelAllJobs = useAppStore((s) => s.cancelAllJobs)
   const removeJob = useAppStore((s) => s.removeJob)
-  const clearCompletedJobs = useAppStore((s) => s.clearCompletedJobs)
+  const removeHistoryEntry = useAppStore((s) => s.removeHistoryEntry)
+  const clearDownloadHistory = useAppStore((s) => s.clearDownloadHistory)
   const shutdownAfterQueue = useAppStore((s) => Boolean(s.config?.shutdownAfterQueue || s.shutdownState?.shutdownAfterQueue))
   const setShutdownAfterQueue = useAppStore((s) => s.setShutdownAfterQueue)
 
@@ -45,6 +50,33 @@ export function QueuePanel() {
     }
   }
 
+  const seriesTitleMap = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const item of merkItems) m.set(item.id, item.title)
+    return m
+  }, [merkItems])
+
+  const standaloneHistory = useMemo(() => {
+    const coveredKeys = new Set<string>()
+    for (const job of queue) {
+      if (job.seriesId && (job.status === 'completed' || job.status === 'cancelled')) {
+        coveredKeys.add(`${job.seriesId}::S${job.season}E${job.episode}`)
+      }
+    }
+    const list: Array<{ key: string; rec: EpisodeRecord; title: string }> = []
+    for (const [key, rec] of Object.entries(episodeIndex.downloaded || {})) {
+      if (coveredKeys.has(key)) continue
+      const sTitle = seriesTitleMap.get(rec.seriesId) || rec.fileName?.replace(/\s*-\s*S\d+E\d+.*$/i, '') || 'Serie'
+      list.push({
+        key,
+        rec,
+        title: rec.fileName || `${sTitle} · ${episodeLabel(rec.season, rec.episode)}`,
+      })
+    }
+    list.sort((a, b) => (b.rec.at || 0) - (a.rec.at || 0))
+    return list
+  }, [episodeIndex.downloaded, queue, seriesTitleMap])
+
   const ordered = [...queue].sort((a, b) => {
     const rank = (s: QueueJob['status']) =>
       s === 'downloading' || s === 'uploading'
@@ -66,6 +98,10 @@ export function QueuePanel() {
     return true
   })
 
+  const showStandaloneInView = filter === 'completed' || filter === 'all'
+  const standaloneVisible = showStandaloneInView ? standaloneHistory : []
+
+  const waitingAutoCount = queue.filter((q) => q.status === 'queued').length
   const cancellableCount = queue.filter(
     (q) =>
       q.status === 'downloading' ||
@@ -78,19 +114,44 @@ export function QueuePanel() {
     (q) => q.status === 'retrying' || q.status === 'failed' || q.status === 'waiting_language' || q.status === 'cancelled',
   ).length
   const completedCount = queue.filter((q) => q.status === 'completed' || q.status === 'cancelled').length
+  const historyCount = completedCount + standaloneHistory.length
+
+  const handleRemoveJob = (job: QueueJob) => {
+    if (job.status === 'completed' && job.seriesId) {
+      void removeHistoryEntry({
+        jobId: job.id,
+        key: `${job.seriesId}::S${job.season}E${job.episode}`,
+      })
+    } else {
+      void removeJob(job.id)
+    }
+  }
 
   return (
     <div className="flex flex-col gap-[24px]">
       <div className="flex flex-col gap-[4px]">
         <h2 className="display-md">Warteschlange</h2>
         <p className="max-w-[34em] text-small text-muted">
-          Alle automatischen und manuellen Downloads. Bei Hoster-Störungen wechselt Sondra AD selbstständig auf den nächsten Mirror und plant bei Netzausfällen gestaffelte Wiederholungen ein.
+          Alle automatischen und manuellen Downloads sowie der Download-Verlauf. Bei Hoster-Störungen wechselt Sondra AD selbstständig auf den nächsten Mirror.
         </p>
       </div>
 
+      {config && !config.enabled && waitingAutoCount > 0 ? (
+        <Notice tone="warn" title="Hintergrund-Überwachung ist pausiert">
+          <div className="flex flex-wrap items-center justify-between gap-[10px]">
+            <span>
+              Automatisch eingereihte Folgen warten derzeit in der Schlange. Manuell eingereihte Adressen starten sofort.
+            </span>
+            <Button size="sm" variant="quiet" onClick={() => void toggleEngine(true)}>
+              Jetzt fortsetzen
+            </Button>
+          </div>
+        </Notice>
+      ) : null}
+
       <Card tone="mint" className="p-[16px] sm:p-[20px]">
         <form onSubmit={(e) => void handleAddUrl(e)} className="flex flex-col gap-[10px]">
-          <span className="text-small font-semibold text-ink">Einzelne Folge oder ganze Staffel direkt einreihen</span>
+          <span className="text-small font-semibold text-ink">Einzelne Folge, Staffel oder Wiedergabeliste direkt einreihen</span>
           <div className="flex flex-col gap-[10px] sm:flex-row">
             <TextInput
               placeholder="https://aniworld.to/anime/stream/… oder direkte Medienadresse"
@@ -110,10 +171,10 @@ export function QueuePanel() {
         <div className="flex flex-wrap gap-[6px]">
           {(
             [
-              ['all', `Alle (${queue.length})`],
+              ['all', `Alle (${queue.length + standaloneHistory.length})`],
               ['active', 'Aktiv & Eingereiht'],
               ['retry', `Wiederholung & Fehler (${retryCount})`],
-              ['completed', `Abgeschlossen (${completedCount})`],
+              ['completed', `Verlauf (${historyCount})`],
             ] as const
           ).map(([key, label]) => {
             const on = filter === key
@@ -156,15 +217,15 @@ export function QueuePanel() {
               Fehlversuche wiederholen
             </Button>
           ) : null}
-          {completedCount > 0 ? (
-            <Button variant="ghost" size="sm" onClick={() => void clearCompletedJobs()}>
-              Abgeschlossene leeren
+          {historyCount > 0 ? (
+            <Button variant="ghost" size="sm" onClick={() => void clearDownloadHistory(true)}>
+              Verlauf leeren
             </Button>
           ) : null}
         </div>
       </div>
 
-      {visible.length === 0 ? (
+      {visible.length === 0 && standaloneVisible.length === 0 ? (
         <SectionHead rule={false} className="py-[12px] font-normal text-muted">
           Keine Einträge in dieser Ansicht der Warteschlange.
         </SectionHead>
@@ -177,8 +238,43 @@ export function QueuePanel() {
               now={now}
               onRetry={(hoster) => void retryJob(job.id, hoster)}
               onCancel={() => void cancelJob(job.id)}
-              onRemove={() => void removeJob(job.id)}
+              onRemove={() => handleRemoveJob(job)}
             />
+          ))}
+          {standaloneVisible.map((entry) => (
+            <li
+              key={entry.key}
+              className="flex flex-col gap-[6px] border-t border-line py-[14px] first:border-t-0"
+            >
+              <div className="flex flex-col justify-between gap-[8px] sm:flex-row sm:items-baseline">
+                <div className="flex min-w-0 items-center gap-[8px]">
+                  <RowMark state="done" />
+                  <span className="truncate text-body font-semibold text-ink">{entry.title}</span>
+                </div>
+                <span className="value shrink-0 text-small text-prose">
+                  Fertig
+                  {entry.rec.sizeBytes ? ` · ${formatBytes(entry.rec.sizeBytes)}` : ''}
+                  {entry.rec.hoster ? ` · ${entry.rec.hoster}` : ''}
+                  {entry.rec.at ? ` · ${formatRelativeTime(entry.rec.at, now)}` : ''}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-[10px]">
+                <span className="value truncate text-micro text-muted">
+                  {entry.rec.drivePath
+                    ? `Gespeichert in Google Drive: Sondra/${entry.rec.drivePath}`
+                    : entry.rec.localPath
+                      ? `Lokal gespeichert: ${entry.rec.localPath}`
+                      : episodeLabel(entry.rec.season, entry.rec.episode)}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => void removeHistoryEntry({ key: entry.key })}
+                >
+                  Löschen
+                </Button>
+              </div>
+            </li>
           ))}
         </ul>
       )}
@@ -224,7 +320,7 @@ function QueueRow({
           {job.status === 'downloading'
             ? `Lädt${job.activeHoster ? ` (${job.activeHoster})` : ''} · ${formatSpeed(job.speedBps)}${job.etaSeconds ? ` · Rest ${formatEta(job.etaSeconds)}` : ''}`
             : job.status === 'uploading'
-              ? `Google Drive Upload · ${formatSpeed(job.speedBps)}`
+              ? `Upload läuft · ${formatSpeed(job.speedBps)}`
               : job.status === 'completed'
                 ? `Fertig · ${formatBytes(job.totalBytes)}${job.activeHoster ? ` · ${job.activeHoster}` : ''}`
                 : job.status === 'retrying'
@@ -297,7 +393,7 @@ function QueueRow({
 
           {!isRunning ? (
             <Button variant="ghost" size="sm" onClick={onRemove}>
-              Entfernen
+              {job.status === 'completed' || job.status === 'cancelled' ? 'Löschen' : 'Entfernen'}
             </Button>
           ) : null}
         </div>

@@ -3,11 +3,15 @@ import fs from 'node:fs'
 import path from 'node:path'
 import {
   checkAniworldOnlineUpdates,
+  extractAnimeKaizen,
   extractAniworldSeason,
   extractDirectMedia,
+  extractGoogleDrive,
   extractPodcast,
+  isAnimeKaizenUrl,
   isAniworldSeasonUrl,
   isAniworldUrl,
+  isGoogleDriveUrl,
   isPodcastOrRssUrl,
 } from '../api/extractors.js'
 import {
@@ -430,10 +434,10 @@ export function createScheduler({
       throw new Error('Bitte eine gültige http(s)-Adresse eingeben.')
     }
     const cfg = store.getConfig()
+    const localAddress = resolveBindIpv4(cfg.bindAddress)
+
     if (isAniworldSeasonUrl(cleanUrl)) {
-      const seasonInfo = await extractAniworldSeason(cleanUrl, {
-        localAddress: resolveBindIpv4(cfg.bindAddress),
-      })
+      const seasonInfo = await extractAniworldSeason(cleanUrl, { localAddress })
       if (seasonInfo && Array.isArray(seasonInfo.items) && seasonInfo.items.length > 0) {
         let added = 0
         for (const ep of seasonInfo.items) {
@@ -446,18 +450,125 @@ export function createScheduler({
             language,
             mode,
             videoPref,
+            manualForce: true,
           })
           if (res.added) added += 1
         }
         return { count: added, playlistTitle: seasonInfo.title }
       }
     }
+
+    if (isPodcastOrRssUrl(cleanUrl)) {
+      const feed = await extractPodcast(cleanUrl, { localAddress }).catch(() => null)
+      if (feed && Array.isArray(feed.items) && feed.items.length > 0) {
+        let added = 0
+        const ordered = [...feed.items].reverse()
+        for (let i = 0; i < ordered.length; i += 1) {
+          const ep = ordered[i]
+          if (!ep?.url) continue
+          const res = worker.enqueueJob({
+            url: ep.url,
+            title: ep.title || `${feed.title || 'Podcast'} - Folge ${i + 1}`,
+            seriesTitle: feed.title || null,
+            season: 1,
+            episode: i + 1,
+            mode: mode || 'audio',
+            manualForce: true,
+          })
+          if (res.added) added += 1
+        }
+        return { count: added, playlistTitle: feed.title }
+      }
+    }
+
+    if (isGoogleDriveUrl(cleanUrl) || isAnimeKaizenUrl(cleanUrl)) {
+      const folderOrSeries = isGoogleDriveUrl(cleanUrl)
+        ? await extractGoogleDrive(cleanUrl, { localAddress }).catch(() => null)
+        : await extractAnimeKaizen(cleanUrl, { localAddress }).catch(() => null)
+      if (folderOrSeries?.isPlaylist && Array.isArray(folderOrSeries.items) && folderOrSeries.items.length > 0) {
+        let added = 0
+        for (let i = 0; i < folderOrSeries.items.length; i += 1) {
+          const ep = folderOrSeries.items[i]
+          if (!ep?.url) continue
+          const res = worker.enqueueJob({
+            url: ep.url,
+            title: ep.title || `${folderOrSeries.title || 'Sammlung'} - ${i + 1}`,
+            seriesTitle: folderOrSeries.seriesTitle || folderOrSeries.title || null,
+            season: typeof ep.seasonNumber === 'number' ? ep.seasonNumber : 1,
+            episode: typeof ep.episodeNumber === 'number' ? ep.episodeNumber : i + 1,
+            language,
+            mode,
+            videoPref,
+            manualForce: true,
+          })
+          if (res.added) added += 1
+        }
+        return { count: added, playlistTitle: folderOrSeries.title }
+      }
+    }
+
+    if (/[?&]list=|\/playlist\b|\/sets\//i.test(cleanUrl)) {
+      const pl = await mediaTools.listPlaylistEntries(cleanUrl).catch(() => null)
+      if (pl && Array.isArray(pl.entries) && pl.entries.length > 0) {
+        let added = 0
+        for (let i = 0; i < pl.entries.length; i += 1) {
+          const ep = pl.entries[i]
+          if (!ep?.url) continue
+          const res = worker.enqueueJob({
+            url: ep.url,
+            title: ep.title || `${pl.title || 'Wiedergabeliste'} - ${i + 1}`,
+            seriesTitle: pl.title || null,
+            season: 1,
+            episode: i + 1,
+            language,
+            mode,
+            videoPref,
+            manualForce: true,
+          })
+          if (res.added) added += 1
+        }
+        return { count: added, playlistTitle: pl.title }
+      }
+    }
+
+    let initialTitle = cleanUrl
+    let seasonNum = 1
+    let episodeNum = 1
+    let seriesTitle = null
+    try {
+      const u = new URL(cleanUrl)
+      const awMatch = u.pathname.match(/\/(?:anime|serie)\/stream\/([^/?#]+)(?:\/staffel-(\d+)\/episode-(\d+)|\/filme\/film-(\d+))?/i)
+      if (awMatch) {
+        const slugTitle = awMatch[1]
+          .split('-')
+          .filter(Boolean)
+          .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+          .join(' ')
+        seriesTitle = slugTitle || null
+        if (awMatch[4]) {
+          seasonNum = 0
+          episodeNum = Number(awMatch[4]) || 1
+          initialTitle = `${slugTitle} - Film ${episodeNum}`
+        } else if (awMatch[2] && awMatch[3]) {
+          seasonNum = Number(awMatch[2]) || 1
+          episodeNum = Number(awMatch[3]) || 1
+          initialTitle = `${slugTitle} - S${String(seasonNum).padStart(2, '0')}E${String(episodeNum).padStart(2, '0')}`
+        } else {
+          initialTitle = slugTitle || cleanUrl
+        }
+      }
+    } catch {}
+
     const res = worker.enqueueJob({
       url: cleanUrl,
-      title: cleanUrl,
+      title: initialTitle,
+      seriesTitle,
+      season: seasonNum,
+      episode: episodeNum,
       language,
       mode,
       videoPref,
+      manualForce: true,
     })
     return { count: res.added ? 1 : 0, job: res.job }
   }

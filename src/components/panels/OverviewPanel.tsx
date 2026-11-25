@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useAppStore } from '../../state/appStore'
-import { formatBytes, formatEta, formatRelativeTime, formatSpeed } from '../../lib/format'
+import { episodeLabel, formatBytes, formatEta, formatRelativeTime, formatSpeed } from '../../lib/format'
 import { Button, Card, Notice, Progress, RowMark, SectionHead, Stat } from '../ui/primitives'
 
 export function OverviewPanel() {
@@ -19,12 +19,64 @@ export function OverviewPanel() {
   const toggleEngine = useAppStore((s) => s.toggleEngine)
   const setPanel = useAppStore((s) => s.setPanel)
   const retryAllFailed = useAppStore((s) => s.retryAllFailed)
+  const removeHistoryEntry = useAppStore((s) => s.removeHistoryEntry)
+  const clearDownloadHistory = useAppStore((s) => s.clearDownloadHistory)
 
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 5000)
     return () => clearInterval(t)
   }, [])
+
+  const recentDownloads = useMemo(() => {
+    const titleById = new Map<string, string>()
+    for (const m of merkItems) titleById.set(m.id, m.title)
+
+    const seenKeys = new Set<string>()
+    const rows: Array<{
+      id: string
+      key?: string
+      jobId?: string
+      title: string
+      sizeBytes: number
+      hoster: string | null
+      at: number
+      target: string | null
+    }> = []
+
+    for (const job of queue) {
+      if (job.status !== 'completed') continue
+      const epKey = job.seriesId ? `${job.seriesId}::S${job.season}E${job.episode}` : undefined
+      if (epKey) seenKeys.add(epKey)
+      rows.push({
+        id: `job-${job.id}`,
+        key: epKey,
+        jobId: job.id,
+        title: job.title,
+        sizeBytes: job.totalBytes || 0,
+        hoster: job.activeHoster || null,
+        at: job.completedAt || job.updatedAt || 0,
+        target: job.drivePath ? `Sondra/${job.drivePath}` : job.localPath || null,
+      })
+    }
+
+    for (const [key, rec] of Object.entries(episodeIndex.downloaded || {})) {
+      if (seenKeys.has(key)) continue
+      const sTitle = titleById.get(rec.seriesId) || rec.fileName?.replace(/\s*-\s*S\d+E\d+.*$/i, '') || 'Serie'
+      rows.push({
+        id: `idx-${key}`,
+        key,
+        title: rec.fileName || `${sTitle} · ${episodeLabel(rec.season, rec.episode)}`,
+        sizeBytes: rec.sizeBytes || 0,
+        hoster: rec.hoster || null,
+        at: rec.at || 0,
+        target: rec.drivePath ? `Sondra/${rec.drivePath}` : rec.localPath || null,
+      })
+    }
+
+    rows.sort((a, b) => b.at - a.at)
+    return rows
+  }, [episodeIndex.downloaded, merkItems, queue])
 
   if (!config) return null
 
@@ -83,11 +135,11 @@ export function OverviewPanel() {
         </div>
       </Card>
 
-      {!drive?.connected && config.storageTarget !== 'local_only' ? (
+      {!drive?.connected && config.storageTarget !== 'local_only' && config.storageTarget !== 'webdav_only' ? (
         <Card tone="slate">
           <p className="text-small font-semibold text-ink">Google Drive noch nicht verbunden</p>
           <p className="mt-[4px] max-w-[34em] text-small text-prose">
-            Ihr Speicherziel steht auf Google Drive. Öffnen Sie die Einstellungen, um sich anzumelden oder die bestehende Anmeldung aus Ihrer Sondra-App mit einem Klick zu übernehmen.
+            Downloads werden bis zur Anmeldung automatisch lokal unter <span className="value">{config.localDir}</span> gesichert. Öffnen Sie die Einstellungen, um Google Drive zu verbinden oder Ihre Sondra-Anmeldung zu übernehmen.
           </p>
         </Card>
       ) : null}
@@ -270,7 +322,7 @@ export function OverviewPanel() {
                     {job.status === 'downloading'
                       ? `Lädt${job.activeHoster ? ` · ${job.activeHoster}` : ''} · ${formatSpeed(job.speedBps)}${job.etaSeconds ? ` · ${formatEta(job.etaSeconds)}` : ''}`
                       : job.status === 'uploading'
-                        ? `Drive-Upload · ${formatSpeed(job.speedBps)}`
+                        ? `Upload · ${formatSpeed(job.speedBps)}`
                         : job.status === 'retrying'
                           ? `Versuch ${job.attempts} · erneut ${formatRelativeTime(job.nextRetryAt, now)}`
                           : job.status === 'waiting_language'
@@ -289,6 +341,51 @@ export function OverviewPanel() {
           </ul>
         )}
       </section>
+
+      {recentDownloads.length > 0 ? (
+        <section className="flex flex-col gap-[8px]">
+          <div className="flex items-baseline justify-between border-t-2 border-rule pt-[12px]">
+            <SectionHead rule={false}>Download-Verlauf</SectionHead>
+            <button
+              type="button"
+              onClick={() => void clearDownloadHistory(true)}
+              className="press text-small text-ink underline decoration-rule underline-offset-[3px] hover:decoration-ink"
+            >
+              Verlauf leeren
+            </button>
+          </div>
+          <ul className="flex flex-col">
+            {recentDownloads.slice(0, 5).map((item) => (
+              <li
+                key={item.id}
+                className="flex flex-col justify-between gap-[4px] border-t border-line py-[8px] first:border-t-0 sm:flex-row sm:items-baseline sm:gap-[16px]"
+              >
+                <div className="flex min-w-0 items-baseline gap-[8px]">
+                  <RowMark state="done" />
+                  <span className="truncate text-small font-medium text-ink">{item.title}</span>
+                  {item.sizeBytes > 0 ? (
+                    <span className="value hidden shrink-0 text-micro text-muted md:inline">
+                      {formatBytes(item.sizeBytes)}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="flex shrink-0 items-baseline gap-[10px]">
+                  {item.at > 0 ? (
+                    <span className="value text-micro text-muted">{formatRelativeTime(item.at, now)}</span>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => void removeHistoryEntry({ key: item.key, jobId: item.jobId })}
+                    className="press text-micro text-muted hover:text-ink"
+                  >
+                    Löschen
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
       <section className="flex flex-col gap-[8px]">
         <div className="flex items-baseline justify-between border-t-2 border-rule pt-[12px]">

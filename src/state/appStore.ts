@@ -134,6 +134,15 @@ export interface AppState {
   cancelAllJobs: () => Promise<number>
   removeJob: (id: string) => Promise<void>
   clearCompletedJobs: () => Promise<void>
+  removeHistoryEntry: (payload: { key?: string; jobId?: string }) => Promise<void>
+  clearDownloadHistory: (clearEpisodeIndex?: boolean) => Promise<void>
+  removeWatchHistory: (payload: {
+    seriesId?: string
+    entryId?: string
+    clearAll?: boolean
+    undoWatched?: boolean
+  }) => Promise<void>
+  removeLogEntry: (id: string) => Promise<void>
   clearLogs: () => Promise<void>
 }
 
@@ -408,6 +417,32 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ queue: res.queue })
   },
 
+  removeHistoryEntry: async (payload) => {
+    const res = await apiCall<{
+      episodeIndex: { downloaded: Record<string, EpisodeRecord>; archived: Record<string, EpisodeRecord> }
+      queue: QueueJob[]
+    }>('history/remove', { body: payload })
+    set({ episodeIndex: res.episodeIndex, queue: res.queue })
+  },
+
+  clearDownloadHistory: async (clearEpisodeIndex = true) => {
+    const res = await apiCall<{
+      episodeIndex: { downloaded: Record<string, EpisodeRecord>; archived: Record<string, EpisodeRecord> }
+      queue: QueueJob[]
+    }>('history/clear', { body: { clearEpisodeIndex } })
+    set({ episodeIndex: res.episodeIndex, queue: res.queue })
+  },
+
+  removeWatchHistory: async (payload) => {
+    const res = await apiCall<{ merkItems: SavedLinkItem[] }>('watch-history/remove', { body: payload })
+    set({ merkItems: res.merkItems })
+  },
+
+  removeLogEntry: async (id) => {
+    const res = await apiCall<{ logs: LogRecord[] }>('logs/remove', { body: { id } })
+    set({ logs: res.logs })
+  },
+
   clearLogs: async () => {
     await apiCall('logs/clear', { body: {} })
     set({ logs: [] })
@@ -466,11 +501,13 @@ export function connectLiveEvents(): () => void {
 
     es.addEventListener('change', (ev) => {
       try {
-        const chg = JSON.parse((ev as MessageEvent).data) as { type?: string }
+        const chg = JSON.parse((ev as MessageEvent).data) as { type?: string; id?: string }
         if (chg.type === 'merkliste' || chg.type === 'drive-auth' || chg.type === 'episodes' || chg.type === 'config') {
           void useAppStore.getState().bootstrap()
         } else if (chg.type === 'logs-cleared') {
           useAppStore.setState({ logs: [] })
+        } else if (chg.type === 'logs-updated' && chg.id) {
+          useAppStore.setState((s) => ({ logs: s.logs.filter((l) => l.id !== chg.id) }))
         }
       } catch {}
     })

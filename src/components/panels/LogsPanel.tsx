@@ -18,6 +18,7 @@ const CATEGORY_LABELS: Record<CategoryFilter, string> = {
 
 export function LogsPanel() {
   const logs = useAppStore((s) => s.logs)
+  const removeLogEntry = useAppStore((s) => s.removeLogEntry)
   const clearLogs = useAppStore((s) => s.clearLogs)
 
   const [category, setCategory] = useState<CategoryFilter>('all')
@@ -133,7 +134,17 @@ export function LogsPanel() {
                   </span>
                   <span className="text-small font-semibold text-ink">{entry.title}</span>
                 </div>
-                <span className="value shrink-0 text-micro text-muted">{formatDateTime(entry.at)}</span>
+                <div className="flex shrink-0 items-baseline gap-[10px]">
+                  <span className="value text-micro text-muted">{formatDateTime(entry.at)}</span>
+                  <button
+                    type="button"
+                    onClick={() => void removeLogEntry(entry.id)}
+                    aria-label="Eintrag löschen"
+                    className="press text-micro text-muted hover:text-ink"
+                  >
+                    Löschen
+                  </button>
+                </div>
               </div>
 
               <p className="pl-[22px] text-small text-prose">{entry.message}</p>

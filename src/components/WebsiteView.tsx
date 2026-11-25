@@ -12,9 +12,8 @@ import {
   WINDOWS_SETUP_ARM64,
   onWindowsArm,
 } from '../lib/downloads'
-import { APP_VERSION } from '../lib/releaseNotes'
 import { Logo } from './AppShell'
-import { ReleaseNotesDialog } from './ReleaseNotesDialog'
+import { APP_VERSION, openWhatsNew, WhatsNewDialog } from './WhatsNew'
 import { ThemeToggle } from './ThemeToggle'
 import { Card, Notice } from './ui/primitives'
 
@@ -330,7 +329,6 @@ export function WebsiteView({
   const [enterDir, setEnterDir] = useState(0)
   const [arm, setArm] = useState(false)
   const [defender, setDefender] = useState<{ url: string; portable: boolean } | null>(null)
-  const [notesOpen, setNotesOpen] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
   const [rule, setRule] = useState<{ left: number; width: number; glide: boolean } | null>(null)
 
@@ -809,14 +807,7 @@ SOFTWARE.`}</pre>
             Sondra AD · Automatischer Hintergrund-Downloader für Windows (Microsoft Store & .exe) und Server.
           </p>
           <p className="value text-micro text-muted">
-            <button
-              type="button"
-              onClick={() => setNotesOpen(true)}
-              className="text-ink underline underline-offset-[3px] hover:no-underline"
-            >
-              v{APP_VERSION}
-            </button>{' '}
-            · keine Cookies · kein Tracking · MIT-Lizenz
+            v{APP_VERSION} · keine Cookies · kein Tracking · MIT-Lizenz
           </p>
         </div>
         <p className="flex flex-wrap gap-x-[16px] gap-y-[4px]">
@@ -829,10 +820,10 @@ SOFTWARE.`}</pre>
           </button>
           <button
             type="button"
-            onClick={() => setNotesOpen(true)}
+            onClick={openWhatsNew}
             className="text-ink underline underline-offset-[3px] hover:no-underline"
           >
-            Änderungen
+            Was ist neu in {APP_VERSION}
           </button>
           <button
             type="button"
@@ -872,7 +863,7 @@ SOFTWARE.`}</pre>
         portable={defender?.portable ?? false}
         onClose={() => setDefender(null)}
       />
-      <ReleaseNotesDialog open={notesOpen} onClose={() => setNotesOpen(false)} />
+      <WhatsNewDialog />
     </div>
   )
 }

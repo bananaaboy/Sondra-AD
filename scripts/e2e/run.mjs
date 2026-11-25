@@ -272,6 +272,10 @@ async function runE2E() {
     await page.waitForSelector('text=Montag')
     await page.click('button:has-text("Liste")')
 
+    await page.click('button:has-text("Verlauf")')
+    await page.waitForSelector('dialog:has-text("Zuletzt geschaut (Verlauf)")')
+    await page.click('dialog button:has-text("Schließen")')
+
     await page.click('[data-tab][data-panel="warteschlange"]')
     await page.waitForSelector('h2:has-text("Warteschlange")')
     await page.waitForSelector('button:has-text("Danach herunterfahren")')
@@ -286,6 +290,10 @@ async function runE2E() {
     await page.waitForSelector('h2:has-text("Protokoll")')
     await page.waitForFunction(() => document.body.innerText.includes('Geladen: Dandadan'), null, { timeout: 10_000 })
 
+    await page.click('[data-tab][data-panel="warteschlange"]')
+    await page.click('button:has-text("Verlauf leeren")')
+    await page.waitForFunction(() => document.body.innerText.includes('Verlauf (0)'), null, { timeout: 5_000 })
+
     await page.click('[data-tab][data-panel="einstellungen"]')
     await page.waitForSelector('h2:has-text("Einstellungen")')
     assert.equal(await page.locator('[data-settings-tab]').count(), 4)
@@ -298,8 +306,9 @@ async function runE2E() {
     await page.click('[data-settings-tab="erweitert"]')
     await page.waitForSelector('text=Hoster-Reihenfolge')
 
-    await page.click('footer button:has-text("Änderungen & Updates")')
-    await page.waitForSelector('dialog:has-text("Änderungen & Updates")')
+    await page.click('footer button:has-text("Was ist neu in")')
+    await page.waitForSelector('dialog:has-text("Was ist neu")')
+    await page.waitForSelector('dialog:has-text("1.0.6")')
     await page.keyboard.press('Escape')
 
     await page.click('header button[aria-label^="Erscheinungsbild"]')

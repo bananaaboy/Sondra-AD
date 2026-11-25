@@ -3,6 +3,7 @@ import type { CSSProperties } from 'react'
 import { useTheme } from './hooks/useTheme'
 import { connectLiveEvents, setStoredToken, useAppStore } from './state/appStore'
 import { Footer, Header } from './components/AppShell'
+import { WhatsNewDialog, WhatsNewLine } from './components/WhatsNew'
 import { WebsiteView } from './components/WebsiteView'
 import { OverviewPanel } from './components/panels/OverviewPanel'
 import { WatchlistPanel } from './components/panels/WatchlistPanel'
@@ -101,6 +102,7 @@ export function App() {
   return (
     <div className="flex min-h-screen flex-col bg-canvas text-prose">
       <Header themeChoice={choice} onThemeChange={setChoice} />
+      <WhatsNewLine />
 
       <main className="shell flex-1 pt-[24px] sm:pt-[32px]">
         <ShutdownBanner />
@@ -150,6 +152,7 @@ export function App() {
       </main>
 
       <Footer />
+      <WhatsNewDialog />
     </div>
   )
 }

@@ -279,20 +279,22 @@ jobs:
           node scripts/merge-update-info.mjs release/latest.yml release-arm64/latest.yml release/latest.yml
           if ($LASTEXITCODE -ne 0) { throw 'latest.yml nicht zusammengefuehrt.' }
 
+          $entry = (Get-Content src/changelog.json -Raw -Encoding utf8 | ConvertFrom-Json).versions | Where-Object { $_.version -eq $version } | Select-Object -First 1
+          if (-not $entry -or -not $entry.items) { throw "src/changelog.json hat keinen Eintrag fuer $version." }
+          $changes = ($entry.items | ForEach-Object { "- $_" }) -join "`n"
+
           $notes = @"
           Sondra AD $version — Automatischer Hintergrund-Downloader fuer die Sondra-Merkliste (Windows & Server).
 
-          **Funktionen in $version**
+          **Neu in $version**
 
-          - Unterbrechungsfreier Dauerbetrieb im Windows-System-Tray mit Windows-Autostart und Standby-Schutz sowie als kopfloser Server-Dienst
-          - Direkte Verbindung mit Sondra ueber Google Drive (``Sondra-Merkliste.sqlite``, ``Serien/<Titel>/Staffel <n>/`` und signierter Geraete-Eintrag) sowie 1-Klick-Uebernahme einer lokalen Sondra-Installation
-          - Automatische Erkennung neuer Staffeln und Episoden (einschliesslich Wiederaufnahme abgeschlossener Serien bei neuen Staffeln)
-          - Automatischer Hoster-Fallback (VOE, FileMoon, Vidmoly, Streamtape, Vidoza, Doodstream, yt-dlp), exponentielle Wiederholungen und Warteliste fuer die Wunschsprache
-          - Einstellbare Speicherbereinigung (Papierkorb und alte gesehene Episoden loeschen, Ungesehene schuetzen) sowie Inaktivitaets-Archivierung, Komprimierung und lokale Auslagerung
+          $changes
 
           **Installieren:** ``Sondra-AD-Setup.exe`` herunterladen und ausfuehren — auf Windows-Rechnern mit Arm-Prozessor ``Sondra-AD-Setup-arm64.exe``. Stille Installation: ``Sondra-AD-Setup-$version.exe /S``
 
           **Ohne Installation:** ``Sondra-AD-Portable.exe`` (Arm: ``Sondra-AD-Portable-arm64.exe``) startet ohne Setup; alle Daten liegen daneben im Ordner ``Sondra-AD-Daten``.
+
+          **Aktualisieren:** Sondra AD sucht automatisch nach neuen Fassungen, laedt sie im Hintergrund und installiert sie per Klick oben in der Kopfleiste.
           "@
 
           $extra = @("$($setup.FullName).blockmap", "$($armSetup.FullName).blockmap") | Where-Object { Test-Path $_ }

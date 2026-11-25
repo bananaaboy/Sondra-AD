@@ -10,6 +10,7 @@ process.env.SONDRA_TEST_ALLOW_LOCAL = '1'
 import { createEngineServer } from '../engine/httpServer.mjs'
 import { computeNextShutdownAt } from '../engine/scheduler.mjs'
 import {
+  downloadHlsSegmentsNative,
   getSeriesUsedBytes,
   isInsideTimeWindow,
   resolveEffectiveBandwidthKbps,
@@ -915,6 +916,134 @@ async function main() {
       delete process.env.SONDRA_PUSHOVER_API_URL
       await new Promise((r) => auxServer.close(() => r()))
     }
+
+    console.log('12. Prüfe AES-128/fMP4-HLS, Drive-Fallback auf lokal, Direktstart & Verlauf-Löschung …')
+    const hlsKey = crypto.randomBytes(16)
+    const hlsInit = Buffer.from('FTYP-FMP4-INIT-HEADER')
+    const hlsPlainSeg = Buffer.from('DECRYPTED-VIDEO-SEGMENT-PAYLOAD-12345')
+    const seqIv = Buffer.alloc(16)
+    seqIv.writeBigUInt64BE(10n, 8)
+    const cipher = crypto.createCipheriv('aes-128-cbc', hlsKey, seqIv)
+    const hlsEncSeg = Buffer.concat([cipher.update(hlsPlainSeg), cipher.final()])
+
+    const hlsServer = http.createServer((req, res) => {
+      if (req.url === '/enc.key') {
+        res.writeHead(200, { 'content-type': 'application/octet-stream' })
+        res.end(hlsKey)
+        return
+      }
+      if (req.url === '/init.mp4') {
+        res.writeHead(200, { 'content-type': 'video/mp4' })
+        res.end(hlsInit)
+        return
+      }
+      if (req.url === '/seg10.m4s') {
+        res.writeHead(200, { 'content-type': 'video/iso.segment' })
+        res.end(hlsEncSeg)
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    })
+    await new Promise((r) => hlsServer.listen(0, '127.0.0.1', () => r()))
+    const hlsBase = `http://127.0.0.1:${hlsServer.address().port}`
+    try {
+      const m3u8 = [
+        '#EXTM3U',
+        '#EXT-X-VERSION:7',
+        '#EXT-X-MEDIA-SEQUENCE:10',
+        '#EXT-X-MAP:URI="init.mp4"',
+        '#EXT-X-KEY:METHOD=AES-128,URI="enc.key"',
+        '#EXTINF:4.0,',
+        'seg10.m4s',
+        '#EXT-X-ENDLIST',
+      ].join('\n')
+      const writtenHls = await downloadHlsSegmentsNative(
+        m3u8,
+        `${hlsBase}/master.m3u8`,
+        path.join(workDir, 'test-hls.ts'),
+        { referer: `${hlsBase}/embed/1` },
+      )
+      assert.ok(writtenHls.endsWith('test-hls.mp4'))
+      const combined = fs.readFileSync(writtenHls)
+      assert.equal(Buffer.compare(combined, Buffer.concat([hlsInit, hlsPlainSeg])), 0)
+    } finally {
+      await new Promise((r) => hlsServer.close(() => r()))
+    }
+
+    await engine.driveAuth.disconnect()
+    engine.store.saveConfig({ enabled: false, storageTarget: 'drive_only' })
+    const manualAdd = await fetch(`${engine.url}api/ad/queue/add`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ url: `${mock.baseUrl}/media/filemoon-ok.mp4` }),
+    }).then((r) => r.json())
+    assert.equal(manualAdd.ok, true)
+    assert.equal(manualAdd.count, 1)
+    const manualJobId = manualAdd.job.id
+
+    await waitUntil(() => engine.store.getQueue().find((j) => j.id === manualJobId)?.status === 'completed')
+    const completedManual = engine.store.getQueue().find((j) => j.id === manualJobId)
+    assert.ok(completedManual.localPath && fs.existsSync(completedManual.localPath))
+    assert.equal(completedManual.driveFileId, null)
+
+    engine.store.saveMerkliste(
+      engine.store.getMerkItems().map((m) =>
+        m.id === 'frieren-id'
+          ? {
+              ...m,
+              history: [
+                { id: 'wh-1', season: 1, episode: 1, at: Date.now() - 5000 },
+                { id: 'wh-2', season: 1, episode: 2, at: Date.now() },
+              ],
+            }
+          : m,
+      ),
+    )
+    const whRem1 = await fetch(`${engine.url}api/ad/watch-history/remove`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ seriesId: 'frieren-id', entryId: 'wh-1' }),
+    }).then((r) => r.json())
+    assert.equal(whRem1.ok, true)
+    assert.equal(whRem1.merkItems.find((m) => m.id === 'frieren-id').history.length, 1)
+
+    const whClear = await fetch(`${engine.url}api/ad/watch-history/remove`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ clearAll: true }),
+    }).then((r) => r.json())
+    assert.equal(whClear.ok, true)
+    assert.equal(whClear.merkItems.find((m) => m.id === 'frieren-id').history.length, 0)
+
+    const sampleLog = engine.store.getLogs(1)[0]
+    assert.ok(sampleLog)
+    const logRem = await fetch(`${engine.url}api/ad/logs/remove`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: sampleLog.id }),
+    }).then((r) => r.json())
+    assert.equal(logRem.ok, true)
+    assert.ok(!logRem.logs.some((l) => l.id === sampleLog.id))
+
+    const dlKeysBefore = Object.keys(engine.store.getEpisodeIndex().downloaded)
+    assert.ok(dlKeysBefore.length >= 1)
+    const histRem = await fetch(`${engine.url}api/ad/history/remove`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ key: dlKeysBefore[0] }),
+    }).then((r) => r.json())
+    assert.equal(histRem.ok, true)
+    assert.ok(!histRem.episodeIndex.downloaded[dlKeysBefore[0]])
+
+    const histClear = await fetch(`${engine.url}api/ad/history/clear`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ clearEpisodeIndex: true }),
+    }).then((r) => r.json())
+    assert.equal(histClear.ok, true)
+    assert.equal(Object.keys(histClear.episodeIndex.downloaded).length, 0)
+    assert.ok(!histClear.queue.some((q) => q.status === 'completed'))
 
     console.log('Alle Prüfungen erfolgreich bestanden.')
   } finally {
