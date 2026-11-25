@@ -4,6 +4,7 @@ import path from 'node:path'
 import {
   checkAniworldOnlineUpdates,
   extractAniworldSeason,
+  extractDirectMedia,
   extractPodcast,
   isAniworldSeasonUrl,
   isAniworldUrl,
@@ -20,6 +21,54 @@ import {
   seriesFolderName,
 } from '../shared/merklisteMerge.mjs'
 import { resolveBindIpv4 } from './mediaTools.mjs'
+
+export function buildReleaseCalendar(merkItems, config, episodeIndex, nextCheckAt = null) {
+  const downloaded = episodeIndex?.downloaded || {}
+  const overrides = config?.seriesOverrides || {}
+  const entries = []
+
+  for (const item of merkItems || []) {
+    if (!item || item.status === 'dropped' || item.status === 'paused') continue
+    const ov = overrides[item.id] || {}
+    if (ov.enabled === false) continue
+
+    let latestDlAt = 0
+    let downloadedCount = 0
+    for (const rec of Object.values(downloaded)) {
+      if (rec && rec.seriesId === item.id) {
+        downloadedCount += 1
+        if (typeof rec.at === 'number' && rec.at > latestDlAt) {
+          latestDlAt = rec.at
+        }
+      }
+    }
+
+    let airDay = null
+    let airDaySource = 'inferred'
+    if (typeof ov.airDay === 'number' && ov.airDay >= 0 && ov.airDay <= 6) {
+      airDay = ov.airDay
+      airDaySource = 'manual'
+    } else {
+      const refTs = latestDlAt || item.onlineAvailable?.checkedAt || item.updatedAt || Date.now()
+      airDay = new Date(refTs).getDay()
+      airDaySource = 'inferred'
+    }
+
+    entries.push({
+      seriesId: item.id,
+      title: item.title,
+      status: item.status || 'watching',
+      airDay,
+      airDaySource,
+      currentSeason: item.season || 1,
+      currentEpisode: typeof item.episode === 'number' ? item.episode : null,
+      downloadedCount,
+      nextCheckAt,
+    })
+  }
+
+  return entries
+}
 
 export function computeNextShutdownAt(timeStr, nowMs = Date.now()) {
   const m = /^(\d{1,2}):(\d{2})$/.exec(String(timeStr || '').trim())
@@ -881,11 +930,13 @@ export function createScheduler({
   let shutdownCountdownEndsAt = null
   let shutdownTimer = null
   let lastShutdownSignature = ''
+  let afterQueueArmed = Boolean(store.getConfig().shutdownAfterQueue)
 
   function getShutdownState() {
     const cfg = store.getConfig()
     return {
       enabled: Boolean(cfg.scheduledShutdownEnabled),
+      shutdownAfterQueue: Boolean(cfg.shutdownAfterQueue),
       action: cfg.scheduledShutdownAction || 'shutdown',
       scheduledAt: cfg.scheduledShutdownEnabled ? scheduledShutdownAt : null,
       waitingForDownloads: shutdownWaitingForDownloads,
@@ -908,10 +959,12 @@ export function createScheduler({
     const cfg = store.getConfig()
     const sig = `${Boolean(cfg.scheduledShutdownEnabled)}|${cfg.scheduledShutdownTime || ''}|${cfg.scheduledShutdownAction || 'shutdown'}`
     if (!cfg.scheduledShutdownEnabled) {
-      clearShutdownTimer()
+      if (!cfg.shutdownAfterQueue) {
+        clearShutdownTimer()
+        shutdownWaitingForDownloads = false
+        shutdownCountdownEndsAt = null
+      }
       scheduledShutdownAt = null
-      shutdownWaitingForDownloads = false
-      shutdownCountdownEndsAt = null
       lastShutdownSignature = sig
       emitShutdownState()
       return getShutdownState()
@@ -927,21 +980,46 @@ export function createScheduler({
     return getShutdownState()
   }
 
+  function setShutdownAfterQueue(enabled) {
+    const flag = Boolean(enabled)
+    store.saveConfig({ shutdownAfterQueue: flag })
+    afterQueueArmed = flag
+    if (!flag && shutdownCountdownEndsAt && !store.getConfig().scheduledShutdownEnabled) {
+      clearShutdownTimer()
+      shutdownCountdownEndsAt = null
+    }
+    store.addLog({
+      category: 'system',
+      title: flag ? 'Herunterfahren nach Warteschlange aktiviert' : 'Herunterfahren nach Warteschlange deaktiviert',
+      message: flag
+        ? 'Sobald alle laufenden und eingereihten Downloads abgeschlossen sind, startet ein 60-Sekunden-Countdown.'
+        : 'Das Gerät bleibt nach Abschluss der Warteschlange eingeschaltet.',
+    })
+    emitShutdownState()
+    return getShutdownState()
+  }
+
   function cancelPendingShutdown() {
     clearShutdownTimer()
     const cfg = store.getConfig()
     shutdownWaitingForDownloads = false
     shutdownCountdownEndsAt = null
+    afterQueueArmed = false
+    const patch = {}
+    if (cfg.shutdownAfterQueue) patch.shutdownAfterQueue = false
     if (cfg.scheduledShutdownEnabled) {
       if (cfg.scheduledShutdownRepeatDaily) {
         scheduledShutdownAt = computeNextShutdownAt(cfg.scheduledShutdownTime, Date.now() + 61_000)
       } else {
-        store.saveConfig({ scheduledShutdownEnabled: false })
+        patch.scheduledShutdownEnabled = false
         scheduledShutdownAt = null
         lastShutdownSignature = `false|${cfg.scheduledShutdownTime || ''}|${cfg.scheduledShutdownAction || 'shutdown'}`
       }
     } else {
       scheduledShutdownAt = null
+    }
+    if (Object.keys(patch).length > 0) {
+      store.saveConfig(patch)
     }
     store.addLog({
       category: 'system',
@@ -952,25 +1030,36 @@ export function createScheduler({
     return getShutdownState()
   }
 
-  function executeScheduledPowerNow() {
+  function executeScheduledPowerNow(reason = 'scheduled') {
     clearShutdownTimer()
     const cfg = store.getConfig()
     const action = cfg.scheduledShutdownAction || 'shutdown'
     shutdownWaitingForDownloads = false
     shutdownCountdownEndsAt = null
-    if (cfg.scheduledShutdownRepeatDaily) {
-      scheduledShutdownAt = computeNextShutdownAt(cfg.scheduledShutdownTime, Date.now() + 61_000)
-    } else {
-      store.saveConfig({ scheduledShutdownEnabled: false })
-      scheduledShutdownAt = null
-      lastShutdownSignature = `false|${cfg.scheduledShutdownTime || ''}|${action}`
+    afterQueueArmed = false
+    const patch = {}
+    if (cfg.shutdownAfterQueue) patch.shutdownAfterQueue = false
+    if (reason === 'scheduled' && cfg.scheduledShutdownEnabled) {
+      if (cfg.scheduledShutdownRepeatDaily) {
+        scheduledShutdownAt = computeNextShutdownAt(cfg.scheduledShutdownTime, Date.now() + 61_000)
+      } else {
+        patch.scheduledShutdownEnabled = false
+        scheduledShutdownAt = null
+        lastShutdownSignature = `false|${cfg.scheduledShutdownTime || ''}|${action}`
+      }
+    }
+    if (Object.keys(patch).length > 0) {
+      store.saveConfig(patch)
     }
     const label =
       action === 'sleep' ? 'Energiesparmodus' : action === 'hibernate' ? 'Ruhezustand' : 'Herunterfahren'
     store.addLog({
       category: 'system',
-      title: `Geplante Energie-Aktion ausgelöst: ${label}`,
-      message: `Ausgeführt um ${cfg.scheduledShutdownTime || 'geplanter Zeit'}.`,
+      title: `Energie-Aktion ausgelöst: ${label}`,
+      message:
+        reason === 'after_queue'
+          ? 'Alle Downloads in der Warteschlange wurden abgeschlossen.'
+          : `Ausgeführt um ${cfg.scheduledShutdownTime || 'geplanter Zeit'}.`,
     })
     emitShutdownState()
     try {
@@ -983,6 +1072,50 @@ export function createScheduler({
         message: String(err?.message ?? err),
       })
     }
+  }
+
+  function startPowerCountdown(nowMs, delayMs, reason) {
+    const cfg = store.getConfig()
+    const delay = Math.max(0, Number(delayMs) || 0)
+    if (delay === 0) {
+      executeScheduledPowerNow(reason)
+      return getShutdownState()
+    }
+    shutdownCountdownEndsAt = nowMs + delay
+    const action = cfg.scheduledShutdownAction || 'shutdown'
+    const label =
+      action === 'sleep' ? 'Energiesparmodus' : action === 'hibernate' ? 'Ruhezustand' : 'Herunterfahren'
+    store.addLog({
+      category: 'system',
+      title: `${label} in ${Math.round(delay / 1000)} Sekunden`,
+      message: 'Kann bis zum Ablauf jederzeit in Sondra AD abgebrochen werden.',
+    })
+    if (cfg.desktopNotifications && onNotify) {
+      try {
+        onNotify({
+          title: `Sondra AD: ${label} in ${Math.round(delay / 1000)} Sek.`,
+          body: 'Öffne Sondra AD, falls du den Vorgang abbrechen möchtest.',
+        })
+      } catch {}
+    }
+    emitShutdownState()
+    shutdownTimer = setTimeout(() => {
+      executeScheduledPowerNow(reason)
+    }, delay)
+    shutdownTimer.unref?.()
+    return getShutdownState()
+  }
+
+  function triggerShutdownAfterQueueIfReady(nowMs = Date.now(), countdownMs = 60_000) {
+    const cfg = store.getConfig()
+    if (!cfg.shutdownAfterQueue || !afterQueueArmed) return getShutdownState()
+    if (shutdownCountdownEndsAt) return getShutdownState()
+    const hasPending =
+      worker.getActiveCount() > 0 ||
+      store.getQueue().some((j) => j.status === 'queued' || j.status === 'downloading' || j.status === 'uploading')
+    if (hasPending) return getShutdownState()
+    afterQueueArmed = false
+    return startPowerCountdown(nowMs, countdownMs, 'after_queue')
   }
 
   function checkScheduledShutdown(nowMs = Date.now(), countdownMs = 60_000) {
@@ -1012,36 +1145,80 @@ export function createScheduler({
     }
 
     shutdownWaitingForDownloads = false
-    const delay = Math.max(0, Number(countdownMs) || 0)
-    if (delay === 0) {
-      executeScheduledPowerNow()
-      return getShutdownState()
-    }
-
-    shutdownCountdownEndsAt = nowMs + delay
-    const action = cfg.scheduledShutdownAction || 'shutdown'
-    const label =
-      action === 'sleep' ? 'Energiesparmodus' : action === 'hibernate' ? 'Ruhezustand' : 'Herunterfahren'
-    store.addLog({
-      category: 'system',
-      title: `${label} in ${Math.round(delay / 1000)} Sekunden`,
-      message: 'Kann bis zum Ablauf jederzeit in Sondra AD abgebrochen werden.',
-    })
-    if (cfg.desktopNotifications && onNotify) {
-      try {
-        onNotify({
-          title: `Sondra AD: ${label} in ${Math.round(delay / 1000)} Sek.`,
-          body: 'Öffne Sondra AD, falls du den Vorgang abbrechen möchtest.',
-        })
-      } catch {}
-    }
-    emitShutdownState()
-    shutdownTimer = setTimeout(() => {
-      executeScheduledPowerNow()
-    }, delay)
-    shutdownTimer.unref?.()
-    return getShutdownState()
+    return startPowerCountdown(nowMs, countdownMs, 'scheduled')
   }
+
+  async function runLanguageUpgradeCheck() {
+    const cfg = store.getConfig()
+    const prio = Array.isArray(cfg.languagePriority) ? cfg.languagePriority.filter((l) => l && l !== 'auto') : []
+    if (!cfg.autoUpgradeLanguage || prio.length < 2) return { upgraded: 0 }
+
+    const itemsById = new Map(store.getMerkItems().map((m) => [m.id, m]))
+    const downloaded = store.getEpisodeIndex().downloaded || {}
+    const localAddress = resolveBindIpv4(cfg.bindAddress)
+    let upgraded = 0
+
+    for (const rec of Object.values(downloaded)) {
+      if (!rec || !rec.seriesId || !rec.language) continue
+      const currentIdx = prio.indexOf(rec.language)
+      if (currentIdx <= 0) continue
+      const item = itemsById.get(rec.seriesId)
+      if (!item || !isAniworldUrl(item.url)) continue
+      const epUrl = buildAniworldEpisodeUrl(item.url, rec.season, rec.episode)
+      if (!epUrl) continue
+
+      for (let i = 0; i < currentIdx; i += 1) {
+        const betterLang = prio[i]
+        try {
+          const probe = await extractDirectMedia(epUrl, {
+            localAddress,
+            language: betterLang,
+            hosterPriority: cfg.hosterPriority,
+            maxMirrors: 2,
+            strictLanguage: true,
+          })
+          if (probe && !probe.languageMissing && ((probe.streams && probe.streams.length > 0) || probe.url)) {
+            const enq = worker.enqueueJob({
+              url: epUrl,
+              title: `${item.title} S${String(rec.season).padStart(2, '0')}E${String(rec.episode).padStart(2, '0')}`,
+              seriesId: item.id,
+              seriesTitle: item.title,
+              season: rec.season,
+              episode: rec.episode,
+              language: betterLang,
+              isUpgrade: true,
+              upgradeFromDriveFileId: rec.driveFileId || null,
+              upgradeFromLocalPath: rec.localPath || null,
+              upgradeFromWebdavPath: rec.webdavPath || null,
+            })
+            if (enq.added) {
+              upgraded += 1
+              store.addLog({
+                category: 'download',
+                title: `Sprach-Upgrade verfügbar: ${item.title} S${String(rec.season).padStart(2, '0')}E${String(rec.episode).padStart(2, '0')}`,
+                message: `${betterLang} ist jetzt verfügbar — alte Version (${rec.language}) wird automatisch ersetzt.`,
+                seriesId: item.id,
+                seriesTitle: item.title,
+                season: rec.season,
+                episode: rec.episode,
+              })
+            }
+            break
+          }
+        } catch {}
+      }
+    }
+    return { upgraded }
+  }
+
+  function getReleaseCalendar() {
+    const meta = store.getMerkMeta()
+    return buildReleaseCalendar(store.getMerkItems(), store.getConfig(), store.getEpisodeIndex(), meta.nextCheckAt || null)
+  }
+
+  worker.setOnQueueIdle?.(() => {
+    triggerShutdownAfterQueueIfReady()
+  })
 
   async function tick() {
     const cfg = store.getConfig()
@@ -1070,6 +1247,9 @@ export function createScheduler({
     const checkEveryMs = Math.max(5, Number(cfg.checkIntervalMinutes) || 30) * 60_000
     if (!meta.lastCheckAt || now - meta.lastCheckAt >= checkEveryMs) {
       await runCheckCycle({ reason: 'scheduled' }).catch(() => {})
+      if (cfg.autoUpgradeLanguage) {
+        await runLanguageUpgradeCheck().catch(() => {})
+      }
     }
 
     if (now - lastCleanupRun >= 15 * 60_000) {
@@ -1131,8 +1311,12 @@ export function createScheduler({
     isChecking: () => checkRunning,
     getShutdownState,
     recomputeShutdownSchedule,
+    setShutdownAfterQueue,
+    triggerShutdownAfterQueueIfReady,
     checkScheduledShutdown,
     cancelPendingShutdown,
+    runLanguageUpgradeCheck,
+    getReleaseCalendar,
     runCheckCycle,
     enqueueManualUrl,
     runStorageCleanup,

@@ -6,6 +6,7 @@ import type {
   LogRecord,
   PanelId,
   QueueJob,
+  ReleaseCalendarEntry,
   SavedLinkItem,
   SeriesOverride,
   ShutdownState,
@@ -107,15 +108,20 @@ export interface AppState {
   queue: QueueJob[]
   episodeIndex: { downloaded: Record<string, EpisodeRecord>; archived: Record<string, EpisodeRecord> }
   logs: LogRecord[]
+  calendar: ReleaseCalendarEntry[]
   storage: StorageReport | null
   loadingStorage: boolean
 
   setPanel: (next: PanelId) => void
   bootstrap: () => Promise<void>
   refreshStorage: () => Promise<void>
+  refreshCalendar: () => Promise<void>
   updateConfig: (patch: Partial<AdConfig>) => Promise<void>
   toggleEngine: (enabled?: boolean) => Promise<void>
   cancelPendingShutdown: () => Promise<void>
+  setShutdownAfterQueue: (enabled: boolean) => Promise<void>
+  testPushNotifications: () => Promise<{ channel: string; ok: boolean; status?: number; error?: string }[]>
+  testWebdav: () => Promise<{ ok: boolean; status?: number; url?: string }>
   checkNow: (seriesId?: string) => Promise<{ checkedSeries: number; totalQueued: number }>
   syncMerkliste: () => Promise<void>
   upsertSeries: (item: Partial<SavedLinkItem> & { checkImmediately?: boolean }) => Promise<void>
@@ -153,6 +159,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   queue: [],
   episodeIndex: { downloaded: {}, archived: {} },
   logs: [],
+  calendar: [],
   storage: null,
   loadingStorage: false,
 
@@ -202,6 +209,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         queue: QueueJob[]
         episodeIndex: { downloaded: Record<string, EpisodeRecord>; archived: Record<string, EpisodeRecord> }
         logs: LogRecord[]
+        calendar?: ReleaseCalendarEntry[]
       }
       if (!data || typeof data !== 'object' || !data.config) {
         if (IN_ELECTRON_APP) {
@@ -229,6 +237,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         queue: data.queue,
         episodeIndex: data.episodeIndex,
         logs: data.logs,
+        calendar: data.calendar ?? [],
       })
       void get().refreshStorage()
     } catch (err) {
@@ -253,16 +262,29 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  refreshCalendar: async () => {
+    try {
+      const res = await apiCall<{ calendar: ReleaseCalendarEntry[] }>('calendar')
+      set({ calendar: res.calendar ?? [] })
+    } catch {}
+  },
+
   updateConfig: async (patch) => {
     const prevCfg = get().config
     if (prevCfg) set({ config: { ...prevCfg, ...patch } })
-    const res = await apiCall<{ config: AdConfig; drive: DriveStatusInfo; shutdownState?: ShutdownState }>('config', {
+    const res = await apiCall<{
+      config: AdConfig
+      drive: DriveStatusInfo
+      shutdownState?: ShutdownState
+      calendar?: ReleaseCalendarEntry[]
+    }>('config', {
       body: patch,
     })
     set({
       config: res.config,
       drive: res.drive,
       ...(res.shutdownState ? { shutdownState: res.shutdownState } : {}),
+      ...(res.calendar ? { calendar: res.calendar } : {}),
     })
   },
 
@@ -278,6 +300,25 @@ export const useAppStore = create<AppState>((set, get) => ({
       body: {},
     })
     set({ shutdownState: res.shutdownState, config: res.config })
+  },
+
+  setShutdownAfterQueue: async (enabled) => {
+    const res = await apiCall<{ shutdownState: ShutdownState; config: AdConfig }>('power/after-queue', {
+      body: { enabled },
+    })
+    set({ shutdownState: res.shutdownState, config: res.config })
+  },
+
+  testPushNotifications: async () => {
+    const res = await apiCall<{ results: { channel: string; ok: boolean; status?: number; error?: string }[] }>(
+      'notifications/test',
+      { body: {} },
+    )
+    return res.results ?? []
+  },
+
+  testWebdav: async () => {
+    return apiCall<{ ok: boolean; status?: number; url?: string }>('storage/test-webdav', { body: {} })
   },
 
   checkNow: async (seriesId) => {

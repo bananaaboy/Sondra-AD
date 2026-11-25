@@ -16,6 +16,75 @@ import {
 } from '../api/extractors.js'
 import { hintProperties, seasonFolderName, seasonPath, seriesFolderName } from '../shared/merklisteMerge.mjs'
 import { resolveBindIpv4 } from './mediaTools.mjs'
+import { dispatchPushNotifications } from './pushNotify.mjs'
+import { deleteWebdavFile, uploadFileToWebdav } from './webdavClient.mjs'
+
+function parseMinutesOfDay(timeStr) {
+  const m = String(timeStr || '').trim().match(/^(\d{1,2}):(\d{2})$/)
+  if (!m) return null
+  const h = Number(m[1])
+  const min = Number(m[2])
+  if (h < 0 || h > 23 || min < 0 || min > 59) return null
+  return h * 60 + min
+}
+
+export function isInsideTimeWindow(startStr, endStr, nowMs = Date.now()) {
+  const start = parseMinutesOfDay(startStr)
+  const end = parseMinutesOfDay(endStr)
+  if (start === null || end === null || start === end) return true
+  const d = new Date(nowMs)
+  const cur = d.getHours() * 60 + d.getMinutes()
+  if (start < end) {
+    return cur >= start && cur < end
+  }
+  return cur >= start || cur < end
+}
+
+export function resolveEffectiveBandwidthKbps(cfg, nowMs = Date.now()) {
+  const baseLimit = Math.max(0, Number(cfg?.maxBandwidthKbps) || 0)
+  if (!cfg?.downloadWindowEnabled) {
+    return { allowed: true, maxBandwidthKbps: baseLimit, inWindow: true }
+  }
+  const inWindow = isInsideTimeWindow(cfg.downloadWindowStart, cfg.downloadWindowEnd, nowMs)
+  if (inWindow) {
+    return { allowed: true, maxBandwidthKbps: baseLimit, inWindow: true }
+  }
+  if (cfg.downloadWindowMode === 'pause_outside') {
+    return { allowed: false, maxBandwidthKbps: 0, inWindow: false }
+  }
+  const dayLimit = Math.max(50, Number(cfg.daytimeMaxBandwidthKbps) || 1500)
+  return { allowed: true, maxBandwidthKbps: dayLimit, inWindow: false }
+}
+
+export function getLocalFreeBytes(dirPath) {
+  try {
+    fs.mkdirSync(dirPath, { recursive: true })
+    const st = fs.statfsSync(dirPath)
+    return Number(st.bavail) * Number(st.bsize)
+  } catch {
+    return null
+  }
+}
+
+export function getSeriesUsedBytes(store, seriesId) {
+  if (!seriesId) return 0
+  const idx = store.getEpisodeIndex()?.downloaded || {}
+  let total = 0
+  for (const rec of Object.values(idx)) {
+    if (rec && rec.seriesId === seriesId && typeof rec.sizeBytes === 'number') {
+      total += rec.sizeBytes
+    }
+  }
+  return total
+}
+
+function localSeasonDirName(season, scheme) {
+  if (scheme === 'jellyfin') {
+    if (Number(season) === 0) return 'Specials'
+    return `Season ${String(season).padStart(2, '0')}`
+  }
+  return seasonFolderName(season)
+}
 
 function sanitizeFileName(raw) {
   return (
@@ -233,13 +302,16 @@ async function downloadHlsSegmentsNative(playlistText, baseUrl, destFile, { refe
 export function createDownloaderWorker({ store, driveAuth, driveService, mediaTools, onNotify = null }) {
   const activeControllers = new Map()
   let pumping = false
+  let onQueueIdle = null
+  let lastLowSpaceLogAt = 0
+  const budgetLogAt = new Map()
 
   function effectiveSettingsForJob(job) {
     const cfg = store.getConfig()
     const override = (job.seriesId && cfg.seriesOverrides?.[job.seriesId]) || {}
     return {
       ...cfg,
-      language: override.language || job.language || cfg.language || 'auto',
+      language: job.language || override.language || cfg.language || 'auto',
       mode: override.mode || job.mode || cfg.mode || 'video',
       videoPref: override.videoPref || job.videoPref || cfg.videoPref || 'best',
       audioPref: override.audioPref || job.audioPref || cfg.audioPref || 'high',
@@ -268,24 +340,7 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
         onNotify({ title, body: message })
       } catch {}
     }
-    if (cfg.discordWebhookUrl && /^https:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/api\/webhooks\//i.test(cfg.discordWebhookUrl)) {
-      await fetch(cfg.discordWebhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: 'Sondra AD',
-          embeds: [
-            {
-              title,
-              description: message,
-              color: level === 'error' ? 0x4e6355 : 0x0b4a22,
-              timestamp: new Date().toISOString(),
-            },
-          ],
-        }),
-        signal: AbortSignal.timeout(10_000),
-      }).catch(() => {})
-    }
+    await dispatchPushNotifications(cfg, { title, body: message, level }).catch(() => {})
   }
 
   async function executeSingleJob(job) {
@@ -300,6 +355,7 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
     let usedHoster = null
     let downloadedPath = null
     let finalFileName = null
+    let resolvedLanguage = settings.language !== 'auto' ? settings.language : null
 
     try {
       store.patchQueueItem(
@@ -332,15 +388,43 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
         (settings.languageWaitFallbackHours <= 0 ||
           Date.now() - (job.createdAt || Date.now()) < settings.languageWaitFallbackHours * 3600_000)
 
+      const effectiveBw = resolveEffectiveBandwidthKbps(settings)
+
       if (isDirectSupportedUrl(job.url)) {
-        const extracted = await extractDirectMedia(job.url, {
-          localAddress,
-          language: settings.language,
-          hosterPriority: settings.hosterPriority,
-          maxMirrors: 6,
-          strictLanguage: shouldStrictWaitLanguage,
-          signal: controller.signal,
-        })
+        let extracted = null
+        if (settings.language === 'auto' && Array.isArray(settings.languagePriority) && settings.languagePriority.length > 0 && isAniworldUrl(job.url)) {
+          for (let i = 0; i < settings.languagePriority.length; i += 1) {
+            const prefLang = settings.languagePriority[i]
+            if (!prefLang || prefLang === 'auto') continue
+            const isLast = i === settings.languagePriority.length - 1
+            const attempt = await extractDirectMedia(job.url, {
+              localAddress,
+              language: prefLang,
+              hosterPriority: settings.hosterPriority,
+              maxMirrors: 6,
+              strictLanguage: !isLast,
+              signal: controller.signal,
+            })
+            if (attempt && !attempt.languageMissing && ((attempt.streams && attempt.streams.length > 0) || attempt.url)) {
+              extracted = attempt
+              resolvedLanguage = prefLang
+              break
+            }
+          }
+        }
+        if (!extracted) {
+          extracted = await extractDirectMedia(job.url, {
+            localAddress,
+            language: settings.language,
+            hosterPriority: settings.hosterPriority,
+            maxMirrors: 6,
+            strictLanguage: shouldStrictWaitLanguage,
+            signal: controller.signal,
+          })
+          if (!resolvedLanguage && extracted?.selectedLanguage) {
+            resolvedLanguage = extracted.selectedLanguage
+          }
+        }
 
         if (extracted?.languageMissing) {
           const availNames = (extracted.availableLanguages || []).map((l) => l.label).join(', ') || 'keine'
@@ -445,7 +529,7 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
               await streamUrlToFile(stream.url, candidateFile, {
                 referer: stream.referer,
                 localAddress,
-                maxBandwidthKbps: settings.maxBandwidthKbps,
+                maxBandwidthKbps: effectiveBw.maxBandwidthKbps,
                 signal: controller.signal,
                 onProgress: (p) =>
                   store.patchQueueItem(job.id, {
@@ -556,8 +640,12 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
       const fileSize = fs.statSync(downloadedPath).size
       const ext = path.extname(finalFileName)
       const mime = mimeForExt(ext, settings.mode)
-      const wantsDrive = settings.storageTarget === 'drive_only' || settings.storageTarget === 'drive_and_local'
+      const wantsDrive =
+        settings.storageTarget === 'drive_only' ||
+        settings.storageTarget === 'drive_and_local' ||
+        settings.storageTarget === 'drive_and_webdav'
       const wantsLocal = settings.storageTarget === 'local_only' || settings.storageTarget === 'drive_and_local'
+      const wantsWebdav = settings.storageTarget === 'webdav_only' || settings.storageTarget === 'drive_and_webdav'
 
       let driveFile = null
       let driveRelPath = null
@@ -607,11 +695,63 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
       let savedLocalPath = null
       if (wantsLocal) {
         const subDir = job.seriesTitle
-          ? path.join(settings.localDir, seriesFolderName(job.seriesTitle), seasonFolderName(job.season ?? 1))
+          ? path.join(
+              settings.localDir,
+              seriesFolderName(job.seriesTitle),
+              localSeasonDirName(job.season ?? 1, settings.localNamingScheme),
+            )
           : settings.localDir
         fs.mkdirSync(subDir, { recursive: true })
         savedLocalPath = path.join(subDir, finalFileName)
         fs.copyFileSync(downloadedPath, savedLocalPath)
+      }
+
+      let webdavRelPath = null
+      if (wantsWebdav) {
+        store.patchQueueItem(
+          job.id,
+          {
+            status: 'uploading',
+            progress: 50,
+            speedBps: 0,
+            etaSeconds: null,
+          },
+          true,
+        )
+        const targetSegments = job.seriesTitle
+          ? [seriesFolderName(job.seriesTitle), localSeasonDirName(job.season ?? 1, settings.localNamingScheme)]
+          : ['Heruntergeladen']
+        const uploaded = await uploadFileToWebdav({
+          url: settings.webdavUrl,
+          username: settings.webdavUsername,
+          password: settings.webdavPassword,
+          basePath: settings.webdavBasePath,
+          segments: targetSegments,
+          fileName: finalFileName,
+          localFilePath: downloadedPath,
+          mime,
+          signal: controller.signal,
+        })
+        webdavRelPath = uploaded.relPath
+      }
+
+      if (job.isUpgrade) {
+        if (job.upgradeFromDriveFileId && driveFile?.id && job.upgradeFromDriveFileId !== driveFile.id && driveAuth.isConnected()) {
+          await driveService.deleteDriveFile(job.upgradeFromDriveFileId).catch(() => {})
+        }
+        if (job.upgradeFromLocalPath && job.upgradeFromLocalPath !== savedLocalPath) {
+          try {
+            fs.rmSync(job.upgradeFromLocalPath, { force: true })
+          } catch {}
+        }
+        if (job.upgradeFromWebdavPath && job.upgradeFromWebdavPath !== webdavRelPath && settings.webdavUrl) {
+          await deleteWebdavFile({
+            url: settings.webdavUrl,
+            username: settings.webdavUsername,
+            password: settings.webdavPassword,
+            relPath: job.upgradeFromWebdavPath,
+          }).catch(() => {})
+        }
       }
 
       try {
@@ -625,6 +765,8 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
           driveFileId: driveFile?.id || null,
           drivePath: driveRelPath,
           localPath: savedLocalPath,
+          webdavPath: webdavRelPath,
+          language: resolvedLanguage,
           hoster: usedHoster,
         })
       }
@@ -649,11 +791,15 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
         true,
       )
 
-      const locationLabel = driveRelPath ? `Sondra/${driveRelPath}` : savedLocalPath
+      const locationLabel = driveRelPath
+        ? `Sondra/${driveRelPath}`
+        : webdavRelPath
+          ? `WebDAV/${webdavRelPath}`
+          : savedLocalPath
       store.addLog({
         category: 'download',
         level: 'info',
-        title: `Geladen: ${finalFileName}`,
+        title: job.isUpgrade ? `Sprach-Upgrade: ${finalFileName}` : `Geladen: ${finalFileName}`,
         message: `Gespeichert unter ${locationLabel} (${(fileSize / (1024 * 1024)).toFixed(1)} MB via ${usedHoster}).`,
         seriesId: job.seriesId,
         seriesTitle: job.seriesTitle,
@@ -773,8 +919,34 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
       for (;;) {
         const cfg = store.getConfig()
         if (!cfg.enabled) break
-        const concurrency = Math.max(1, Math.min(4, Number(cfg.concurrency) || 1))
         const now = Date.now()
+        const bwState = resolveEffectiveBandwidthKbps(cfg, now)
+        if (!bwState.allowed) break
+
+        if (cfg.pauseOnLowSpace && Number(cfg.minFreeLocalGb) > 0) {
+          const freeBytes = getLocalFreeBytes(cfg.tempDir)
+          const minBytes = Number(cfg.minFreeLocalGb) * 1024 * 1024 * 1024
+          if (freeBytes !== null && freeBytes < minBytes) {
+            if (now - lastLowSpaceLogAt > 15 * 60_000) {
+              lastLowSpaceLogAt = now
+              const freeGb = (freeBytes / (1024 * 1024 * 1024)).toFixed(2)
+              store.addLog({
+                category: 'storage',
+                level: 'warn',
+                title: 'Downloads pausiert: Wenig freier Speicher',
+                message: `Nur noch ${freeGb} GB frei (Puffer: ${cfg.minFreeLocalGb} GB). Downloads starten wieder, sobald Platz frei wird.`,
+              })
+              await sendNotification(
+                'Speicher knapp — Downloads pausiert',
+                `Lokal sind nur noch ${freeGb} GB frei (Minimum: ${cfg.minFreeLocalGb} GB).`,
+                'warn',
+              )
+            }
+            break
+          }
+        }
+
+        const concurrency = Math.max(1, Math.min(4, Number(cfg.concurrency) || 1))
 
         let wokeAny = false
         const currentQueue = store.getQueue()
@@ -792,19 +964,51 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
         const activeCount = activeControllers.size
         if (activeCount >= concurrency) break
 
-        const nextJob = refreshed.find((item) => item.status === 'queued' && !activeControllers.has(item.id))
-        if (!nextJob) break
+        const eligible = refreshed.filter((item) => {
+          if (item.status !== 'queued' || activeControllers.has(item.id)) return false
+          if (item.seriesId) {
+            const ov = cfg.seriesOverrides?.[item.seriesId]
+            const maxGb = Number(ov?.maxStorageGb || 0)
+            if (maxGb > 0) {
+              const used = getSeriesUsedBytes(store, item.seriesId)
+              if (used >= maxGb * 1024 * 1024 * 1024) {
+                const prevLog = budgetLogAt.get(item.seriesId) || 0
+                if (now - prevLog > 15 * 60_000) {
+                  budgetLogAt.set(item.seriesId, now)
+                  store.addLog({
+                    category: 'storage',
+                    level: 'warn',
+                    title: `Speicherbudget erreicht: ${item.seriesTitle || item.title}`,
+                    message: `Belegt ${(used / (1024 * 1024 * 1024)).toFixed(2)} GB von maximal ${maxGb} GB.`,
+                    seriesId: item.seriesId,
+                    seriesTitle: item.seriesTitle,
+                  })
+                }
+                return false
+              }
+            }
+          }
+          return true
+        })
+
+        if (eligible.length === 0) break
 
         const slots = concurrency - activeCount
-        const batch = refreshed
-          .filter((item) => item.status === 'queued' && !activeControllers.has(item.id))
-          .slice(0, slots)
+        const batch = eligible.slice(0, slots)
 
         if (batch.length === 0) break
         await Promise.all(batch.map((job) => executeSingleJob(job)))
       }
     } finally {
       pumping = false
+      const remaining = store
+        .getQueue()
+        .some((j) => j.status === 'queued' || j.status === 'downloading' || j.status === 'uploading')
+      if (!remaining && activeControllers.size === 0 && onQueueIdle) {
+        try {
+          onQueueIdle()
+        } catch {}
+      }
     }
   }
 
@@ -833,6 +1037,10 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
       mode: input.mode || null,
       videoPref: input.videoPref || null,
       preferredHoster: input.preferredHoster || null,
+      isUpgrade: Boolean(input.isUpgrade),
+      upgradeFromDriveFileId: input.upgradeFromDriveFileId || null,
+      upgradeFromLocalPath: input.upgradeFromLocalPath || null,
+      upgradeFromWebdavPath: input.upgradeFromWebdavPath || null,
       status: 'queued',
       progress: 0,
       loadedBytes: 0,
@@ -966,6 +1174,10 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
     cancelAllJobs,
     removeJob,
     clearCompletedJobs,
+    sendNotification,
+    setOnQueueIdle: (fn) => {
+      onQueueIdle = typeof fn === 'function' ? fn : null
+    },
     getActiveCount: () => activeControllers.size,
   }
 }

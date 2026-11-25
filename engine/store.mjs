@@ -18,8 +18,15 @@ export function defaultConfig(dataDir) {
     merkSyncIntervalMinutes: 5,
     concurrency: 1,
     maxBandwidthKbps: 0,
+    downloadWindowEnabled: false,
+    downloadWindowStart: '23:00',
+    downloadWindowEnd: '07:00',
+    downloadWindowMode: 'throttle_outside',
+    daytimeMaxBandwidthKbps: 1500,
 
     language: 'auto',
+    languagePriority: ['ger_dub', 'ger_sub', 'eng_sub'],
+    autoUpgradeLanguage: false,
     waitForPreferredLanguage: true,
     languageWaitFallbackHours: 0,
     mode: 'video',
@@ -34,8 +41,13 @@ export function defaultConfig(dataDir) {
 
     storageTarget: 'drive_only',
     localDir: path.join(downloadsBase, 'Sondra-AD'),
+    localNamingScheme: 'sondra',
     tempDir: path.join(dataDir, 'staging'),
     localArchiveDir: path.join(downloadsBase, 'Sondra-AD-Archiv'),
+    webdavUrl: '',
+    webdavUsername: '',
+    webdavPassword: '',
+    webdavBasePath: '/Sondra',
 
     watchStatuses: ['watching', 'later', 'done'],
     backlogMode: 'from_current',
@@ -47,6 +59,7 @@ export function defaultConfig(dataDir) {
     autoRetryOnNetworkRestore: true,
 
     cleanupEnabled: true,
+    pauseOnLowSpace: true,
     maxSondraDriveGb: 0,
     minFreeDriveGb: 2,
     minFreeLocalGb: 5,
@@ -70,6 +83,12 @@ export function defaultConfig(dataDir) {
     notifyOnComplete: true,
     notifyOnFailure: true,
     discordWebhookUrl: '',
+    telegramBotToken: '',
+    telegramChatId: '',
+    ntfyUrl: '',
+    ntfyToken: '',
+    pushoverAppToken: '',
+    pushoverUserKey: '',
     remoteAccessToken: '',
 
     scheduledShutdownEnabled: false,
@@ -77,6 +96,7 @@ export function defaultConfig(dataDir) {
     scheduledShutdownAction: 'shutdown',
     scheduledShutdownWaitForDownloads: true,
     scheduledShutdownRepeatDaily: false,
+    shutdownAfterQueue: false,
   }
 }
 

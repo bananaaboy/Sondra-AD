@@ -9,6 +9,13 @@ process.env.SONDRA_TEST_ALLOW_LOCAL = '1'
 
 import { createEngineServer } from '../engine/httpServer.mjs'
 import { computeNextShutdownAt } from '../engine/scheduler.mjs'
+import {
+  getSeriesUsedBytes,
+  isInsideTimeWindow,
+  resolveEffectiveBandwidthKbps,
+} from '../engine/downloaderWorker.mjs'
+import { dispatchPushNotifications } from '../engine/pushNotify.mjs'
+import { testWebdavConnection, uploadFileToWebdav } from '../engine/webdavClient.mjs'
 import { decryptPairingBundle, encryptPairingBundle } from '../engine/driveAuth.mjs'
 import { checkRecord } from '../shared/deviceIdentity.mjs'
 import { mergeShared, normalizeMerkItem, readSharedMerkliste, sharedSqliteBytes } from '../shared/merklisteMerge.mjs'
@@ -778,6 +785,136 @@ async function main() {
     await engine.scheduler.checkScheduledShutdown(schedState2.scheduledAt + 1000, 0)
     assert.deepEqual(triggeredPowerActions, ['shutdown'])
     assert.equal(engine.store.getConfig().scheduledShutdownEnabled, false)
+
+    console.log('11. Prüfe Zeitfenster, Nach-Queue-Shutdown, Wochenplan, Push-Dienste & WebDAV …')
+    const at0200 = new Date(2026, 4, 11, 2, 0, 0, 0).getTime()
+    const at1400 = new Date(2026, 4, 11, 14, 0, 0, 0).getTime()
+    assert.equal(isInsideTimeWindow('23:00', '07:00', at0200), true)
+    assert.equal(isInsideTimeWindow('23:00', '07:00', at1400), false)
+    const nightBw = resolveEffectiveBandwidthKbps(
+      {
+        downloadWindowEnabled: true,
+        downloadWindowStart: '23:00',
+        downloadWindowEnd: '07:00',
+        downloadWindowMode: 'throttle_outside',
+        maxBandwidthKbps: 0,
+        daytimeMaxBandwidthKbps: 1200,
+      },
+      at0200,
+    )
+    assert.equal(nightBw.allowed, true)
+    assert.equal(nightBw.maxBandwidthKbps, 0)
+    const dayBw = resolveEffectiveBandwidthKbps(
+      {
+        downloadWindowEnabled: true,
+        downloadWindowStart: '23:00',
+        downloadWindowEnd: '07:00',
+        downloadWindowMode: 'throttle_outside',
+        maxBandwidthKbps: 0,
+        daytimeMaxBandwidthKbps: 1200,
+      },
+      at1400,
+    )
+    assert.equal(dayBw.allowed, true)
+    assert.equal(dayBw.maxBandwidthKbps, 1200)
+    const pauseBw = resolveEffectiveBandwidthKbps(
+      {
+        downloadWindowEnabled: true,
+        downloadWindowStart: '23:00',
+        downloadWindowEnd: '07:00',
+        downloadWindowMode: 'pause_outside',
+        maxBandwidthKbps: 0,
+      },
+      at1400,
+    )
+    assert.equal(pauseBw.allowed, false)
+
+    const afterQRes = await fetch(`${engine.url}api/ad/power/after-queue`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: true }),
+    }).then((r) => r.json())
+    assert.equal(afterQRes.ok, true)
+    assert.equal(afterQRes.shutdownState.shutdownAfterQueue, true)
+    engine.scheduler.triggerShutdownAfterQueueIfReady(Date.now(), 0)
+    assert.deepEqual(triggeredPowerActions, ['shutdown', 'shutdown'])
+    assert.equal(engine.store.getConfig().shutdownAfterQueue, false)
+
+    engine.store.saveConfig({
+      seriesOverrides: {
+        ...engine.store.getConfig().seriesOverrides,
+        'frieren-id': {
+          ...(engine.store.getConfig().seriesOverrides['frieren-id'] || {}),
+          airDay: 5,
+          maxStorageGb: 10,
+        },
+      },
+    })
+    const calRes = await fetch(`${engine.url}api/ad/calendar`).then((r) => r.json())
+    assert.equal(calRes.ok, true)
+    const frierenCal = calRes.calendar.find((c) => c.seriesId === 'frieren-id')
+    assert.ok(frierenCal)
+    assert.equal(frierenCal.airDay, 5)
+    assert.equal(frierenCal.airDaySource, 'manual')
+    assert.ok(getSeriesUsedBytes(engine.store, 'frieren-id') > 0)
+
+    const receivedRequests = []
+    const auxServer = http.createServer(async (req, res) => {
+      const chunks = []
+      for await (const c of req) chunks.push(c)
+      receivedRequests.push({ method: req.method, url: req.url, bytes: Buffer.concat(chunks).byteLength })
+      if (req.method === 'OPTIONS') {
+        res.writeHead(200, { DAV: '1,2' })
+        res.end()
+        return
+      }
+      if (req.method === 'MKCOL' || req.method === 'PUT') {
+        res.writeHead(201)
+        res.end()
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true }))
+    })
+    await new Promise((r) => auxServer.listen(0, '127.0.0.1', () => r()))
+    const auxPort = auxServer.address().port
+    const auxBase = `http://127.0.0.1:${auxPort}`
+    try {
+      process.env.SONDRA_TELEGRAM_API_BASE = auxBase
+      process.env.SONDRA_PUSHOVER_API_URL = `${auxBase}/pushover`
+      const pushResults = await dispatchPushNotifications(
+        {
+          telegramBotToken: 'bot123',
+          telegramChatId: '999',
+          ntfyUrl: `${auxBase}/ntfy-topic`,
+          pushoverAppToken: 'app1',
+          pushoverUserKey: 'usr1',
+        },
+        { title: 'Test', body: 'Hallo' },
+      )
+      assert.equal(pushResults.length, 3)
+      assert.ok(pushResults.every((r) => r.ok))
+
+      const wdTest = await testWebdavConnection({ url: `${auxBase}/dav`, username: 'u', password: 'p', basePath: '/Sondra' })
+      assert.equal(wdTest.ok, true)
+      const tmpSample = path.join(workDir, 'sample.mp4')
+      fs.writeFileSync(tmpSample, Buffer.from('0123456789'))
+      const wdUp = await uploadFileToWebdav({
+        url: `${auxBase}/dav`,
+        username: 'u',
+        password: 'p',
+        basePath: '/Sondra',
+        segments: ['Frieren', 'Season 01'],
+        fileName: 'Frieren - S01E01.mp4',
+        localFilePath: tmpSample,
+      })
+      assert.equal(wdUp.size, 10)
+      assert.ok(receivedRequests.some((r) => r.method === 'PUT' && r.url.includes('Frieren%20-%20S01E01.mp4')))
+    } finally {
+      delete process.env.SONDRA_TELEGRAM_API_BASE
+      delete process.env.SONDRA_PUSHOVER_API_URL
+      await new Promise((r) => auxServer.close(() => r()))
+    }
 
     console.log('Alle Prüfungen erfolgreich bestanden.')
   } finally {

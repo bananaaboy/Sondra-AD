@@ -268,8 +268,13 @@ async function runE2E() {
     await page.waitForSelector('dialog:has-text("Staffel 2")')
     await page.click('dialog button:has-text("Regeln übernehmen")')
 
+    await page.click('button:has-text("Wochenplan")')
+    await page.waitForSelector('text=Montag')
+    await page.click('button:has-text("Liste")')
+
     await page.click('[data-tab][data-panel="warteschlange"]')
     await page.waitForSelector('h2:has-text("Warteschlange")')
+    await page.waitForSelector('button:has-text("Danach herunterfahren")')
     await page.waitForFunction(() => document.body.innerText.includes('Fertig'), null, { timeout: 10_000 })
 
     await page.click('[data-tab][data-panel="speicher"]')
@@ -285,12 +290,17 @@ async function runE2E() {
     await page.waitForSelector('h2:has-text("Einstellungen")')
     assert.equal(await page.locator('[data-settings-tab]').count(), 4)
     await page.click('[data-settings-tab="downloads"]')
-    await page.waitForSelector('text=Bevorzugte Sprache')
+    await page.waitForSelector('text=Sprach-Priorität & Auto-Upgrade')
     await page.click('[data-settings-tab="betrieb"]')
-    await page.waitForSelector('text=Prüfintervall')
+    await page.waitForSelector('text=Download-Zeitfenster / Nachtmodus')
     await page.waitForSelector('text=Geplantes Herunterfahren')
+    await page.waitForSelector('text=Benachrichtigungen & Handy-Push')
     await page.click('[data-settings-tab="erweitert"]')
     await page.waitForSelector('text=Hoster-Reihenfolge')
+
+    await page.click('footer button:has-text("Änderungen & Updates")')
+    await page.waitForSelector('dialog:has-text("Änderungen & Updates")')
+    await page.keyboard.press('Escape')
 
     await page.click('header button[aria-label^="Erscheinungsbild"]')
     await page.waitForTimeout(200)

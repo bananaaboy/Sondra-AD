@@ -20,12 +20,25 @@ const STATUS_LABELS: Record<SavedLinkStatus, string> = {
   dropped: 'Abgebrochen',
 }
 
+const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0] as const
+const WEEKDAY_LABELS: Record<number, string> = {
+  1: 'Montag',
+  2: 'Dienstag',
+  3: 'Mittwoch',
+  4: 'Donnerstag',
+  5: 'Freitag',
+  6: 'Samstag',
+  0: 'Sonntag',
+}
+
 export function WatchlistPanel() {
   const config = useAppStore((s) => s.config)
   const drive = useAppStore((s) => s.drive)
   const checking = useAppStore((s) => s.checking)
   const merkItems = useAppStore((s) => s.merkItems)
+  const merkMeta = useAppStore((s) => s.merkMeta)
   const episodeIndex = useAppStore((s) => s.episodeIndex)
+  const calendar = useAppStore((s) => s.calendar)
 
   const syncMerkliste = useAppStore((s) => s.syncMerkliste)
   const checkNow = useAppStore((s) => s.checkNow)
@@ -33,6 +46,7 @@ export function WatchlistPanel() {
   const removeSeries = useAppStore((s) => s.removeSeries)
   const setSeriesOverride = useAppStore((s) => s.setSeriesOverride)
 
+  const [viewMode, setViewMode] = useState<'list' | 'calendar'>('list')
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | SavedLinkStatus>('all')
   const [syncing, setSyncing] = useState(false)
@@ -156,6 +170,28 @@ export function WatchlistPanel() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-[8px]">
+          <div className="inline-flex rounded-pill bg-panel-soft p-[3px]">
+            <button
+              type="button"
+              aria-pressed={viewMode === 'list'}
+              onClick={() => setViewMode('list')}
+              className={`press rounded-pill px-[12px] py-[5px] text-micro font-medium ${
+                viewMode === 'list' ? 'bg-ink text-on-ink' : 'text-prose hover:text-ink'
+              }`}
+            >
+              Liste
+            </button>
+            <button
+              type="button"
+              aria-pressed={viewMode === 'calendar'}
+              onClick={() => setViewMode('calendar')}
+              className={`press rounded-pill px-[12px] py-[5px] text-micro font-medium ${
+                viewMode === 'calendar' ? 'bg-ink text-on-ink' : 'text-prose hover:text-ink'
+              }`}
+            >
+              Wochenplan
+            </button>
+          </div>
           {drive?.connected ? (
             <Button variant="quiet" size="sm" disabled={syncing} onClick={() => void handleSync()}>
               {syncing ? 'Gleicht ab …' : 'Mit Drive abgleichen'}
@@ -170,6 +206,66 @@ export function WatchlistPanel() {
         </div>
       </div>
 
+      {viewMode === 'calendar' ? (
+        <section className="flex flex-col gap-[16px] border-t-2 border-rule pt-[16px]">
+          <div className="flex flex-wrap items-center justify-between gap-[8px]">
+            <p className="text-small text-muted">
+              Erwartete Ausstrahlungstage laufender Serien. Über „Regeln“ lässt sich der Wochentag je Serie festlegen.
+            </p>
+            {merkMeta.nextCheckAt ? (
+              <span className="value text-micro text-muted">
+                Nächste Suche: {formatRelativeTime(merkMeta.nextCheckAt)}
+              </span>
+            ) : null}
+          </div>
+          <div className="grid grid-cols-1 gap-[10px] sm:grid-cols-2 lg:grid-cols-7">
+            {WEEKDAY_ORDER.map((dayIdx) => {
+              const isToday = new Date().getDay() === dayIdx
+              const dayEntries = calendar.filter((c) => c.airDay === dayIdx)
+              return (
+                <div
+                  key={dayIdx}
+                  className={`flex flex-col gap-[8px] rounded-card border p-[12px] ${
+                    isToday ? 'border-ink bg-panel-soft/80' : 'border-line bg-surface'
+                  }`}
+                >
+                  <div className="flex items-center justify-between border-b border-line pb-[6px]">
+                    <span className="text-small font-semibold text-ink">{WEEKDAY_LABELS[dayIdx]}</span>
+                    {isToday ? <span className="value text-micro text-ink">Heute</span> : null}
+                  </div>
+                  {dayEntries.length === 0 ? (
+                    <span className="text-micro text-muted">Keine Serie</span>
+                  ) : (
+                    <ul className="flex flex-col gap-[6px]">
+                      {dayEntries.map((entry) => {
+                        const match = merkItems.find((m) => m.id === entry.seriesId)
+                        return (
+                          <li key={entry.seriesId}>
+                            <button
+                              type="button"
+                              onClick={() => match && setOverrideTarget(match)}
+                              className="press flex w-full flex-col items-start rounded-nav bg-panel-soft px-[8px] py-[6px] text-left hover:bg-panel-soft/90"
+                            >
+                              <span className="line-clamp-1 text-micro font-semibold text-ink">{entry.title}</span>
+                              <span className="value text-[11px] text-muted">
+                                S{entry.currentSeason}
+                                {entry.currentEpisode ? `E${entry.currentEpisode}` : ''} ·{' '}
+                                {entry.airDaySource === 'manual' ? 'Fest' : 'Geschätzt'}
+                              </span>
+                            </button>
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </section>
+      ) : null}
+
+      {viewMode === 'list' ? (
       <div className="flex flex-col justify-between gap-[12px] border-t-2 border-rule pt-[14px] sm:flex-row sm:items-center">
         <div className="flex flex-wrap gap-[6px]">
           {(
@@ -208,8 +304,9 @@ export function WatchlistPanel() {
           />
         </div>
       </div>
+      ) : null}
 
-      {filtered.length === 0 ? (
+      {viewMode === 'list' && filtered.length === 0 ? (
         <Card tone="mint" className="flex flex-col items-start gap-[12px] p-[24px]">
           <p className="text-body font-semibold text-ink">
             {merkItems.length === 0 ? 'Ihre Merkliste ist noch leer' : 'Keine Serie passt zum gewählten Filter'}
@@ -225,7 +322,7 @@ export function WatchlistPanel() {
             </Button>
           ) : null}
         </Card>
-      ) : (
+      ) : viewMode === 'list' ? (
         <ul className="rise-list flex flex-col">
           {filtered.map((item) => {
             const autoOn = isSeriesAutoEnabled(item)
@@ -317,7 +414,7 @@ export function WatchlistPanel() {
             )
           })}
         </ul>
-      )}
+      ) : null}
 
       <Dialog
         open={addOpen}
@@ -455,6 +552,12 @@ function SeriesOverrideDialog({
   const [lookaheadLimit, setLookaheadLimit] = useState<string>(
     typeof current?.lookaheadLimit === 'number' ? String(current.lookaheadLimit) : '',
   )
+  const [maxStorageGb, setMaxStorageGb] = useState<string>(
+    typeof current?.maxStorageGb === 'number' && current.maxStorageGb > 0 ? String(current.maxStorageGb) : '',
+  )
+  const [airDay, setAirDay] = useState<string>(
+    typeof current?.airDay === 'number' && current.airDay >= 0 && current.airDay <= 6 ? String(current.airDay) : '',
+  )
 
   const discoveredNumbers = (() => {
     const nums = new Set<number>()
@@ -550,6 +653,8 @@ function SeriesOverrideDialog({
       ...(videoPref ? { videoPref } : {}),
       ...(backlogMode ? { backlogMode } : {}),
       ...(lookaheadLimit.trim() !== '' ? { lookaheadLimit: Math.max(0, Number(lookaheadLimit) || 0) } : {}),
+      ...(maxStorageGb.trim() !== '' ? { maxStorageGb: Math.max(0, Number(maxStorageGb) || 0) } : {}),
+      ...(airDay !== '' ? { airDay: Number(airDay) } : {}),
       ...(hasCustomSeasonRule ? { seasonRules: cleanedRules } : {}),
     })
   }
@@ -695,8 +800,7 @@ function SeriesOverrideDialog({
 
           <Field
             label="Vorrats-Limit insgesamt (0 = unbegrenzt)"
-            hint="Leer = globale Vorgabe; begrenzt, wie viele ungesehene Folgen gleichzeitig vorgeladen werden."
-            className="sm:col-span-2"
+            hint="Begrenzt vorgeladene ungesehene Folgen."
           >
             <TextInput
               type="number"
@@ -705,6 +809,37 @@ function SeriesOverrideDialog({
               value={lookaheadLimit}
               onChange={(e) => setLookaheadLimit(e.target.value)}
             />
+          </Field>
+
+          <Field
+            label="Speicherbudget (GB, 0 = unbegrenzt)"
+            hint="Pausiert neue Folgen dieser Serie ab diesem Limit."
+          >
+            <TextInput
+              type="number"
+              min={0}
+              step={0.5}
+              placeholder="Unbegrenzt"
+              value={maxStorageGb}
+              onChange={(e) => setMaxStorageGb(e.target.value)}
+            />
+          </Field>
+
+          <Field
+            label="Ausstrahlungstag (Wochenplan)"
+            hint="Wird im Wochenplan angezeigt; leer = automatisch geschätzt."
+            className="sm:col-span-2"
+          >
+            <Select value={airDay} onChange={(e) => setAirDay(e.target.value)}>
+              <option value="">Automatisch schätzen</option>
+              <option value="1">Montag</option>
+              <option value="2">Dienstag</option>
+              <option value="3">Mittwoch</option>
+              <option value="4">Donnerstag</option>
+              <option value="5">Freitag</option>
+              <option value="6">Samstag</option>
+              <option value="0">Sonntag</option>
+            </Select>
           </Field>
         </div>
 

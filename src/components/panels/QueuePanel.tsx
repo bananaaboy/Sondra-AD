@@ -15,6 +15,8 @@ export function QueuePanel() {
   const cancelAllJobs = useAppStore((s) => s.cancelAllJobs)
   const removeJob = useAppStore((s) => s.removeJob)
   const clearCompletedJobs = useAppStore((s) => s.clearCompletedJobs)
+  const shutdownAfterQueue = useAppStore((s) => Boolean(s.config?.shutdownAfterQueue || s.shutdownState?.shutdownAfterQueue))
+  const setShutdownAfterQueue = useAppStore((s) => s.setShutdownAfterQueue)
 
   const [manualUrl, setManualUrl] = useState('')
   const [adding, setAdding] = useState(false)
@@ -132,6 +134,18 @@ export function QueuePanel() {
         </div>
 
         <div className="flex flex-wrap items-center gap-[10px]">
+          <button
+            type="button"
+            aria-pressed={shutdownAfterQueue}
+            onClick={() => void setShutdownAfterQueue(!shutdownAfterQueue)}
+            className={`press rounded-pill border px-[12px] py-[6px] text-micro font-medium transition-colors ${
+              shutdownAfterQueue
+                ? 'border-ink bg-ink text-on-ink'
+                : 'border-line bg-surface text-prose hover:border-ink hover:text-ink'
+            }`}
+          >
+            {shutdownAfterQueue ? 'Danach herunterfahren: An' : 'Danach herunterfahren'}
+          </button>
           {cancellableCount > 0 ? (
             <Button variant="quiet" size="sm" onClick={() => void cancelAllJobs()}>
               Alle abbrechen ({cancellableCount})

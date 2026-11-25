@@ -1,7 +1,9 @@
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { APP_VERSION } from '../lib/releaseNotes'
 import type { ThemeChoice } from '../lib/theme'
 import type { PanelId } from '../types'
 import { useAppStore } from '../state/appStore'
+import { ReleaseNotesDialog } from './ReleaseNotesDialog'
 import { ThemeToggle } from './ThemeToggle'
 import { Badge, Button } from './ui/primitives'
 
@@ -215,27 +217,61 @@ export function Footer() {
   const runtimeMode = useAppStore((s) => s.runtimeMode)
   const drive = useAppStore((s) => s.drive)
   const tools = useAppStore((s) => s.tools)
+  const [notesOpen, setNotesOpen] = useState(false)
+  const [updateReady, setUpdateReady] = useState<string | null>(null)
+
+  useEffect(() => {
+    let unsub: (() => void) | undefined
+    if (window.sondraAd?.getUpdateState) {
+      void window.sondraAd.getUpdateState().then((st) => {
+        if (st?.status === 'downloaded') setUpdateReady(st.availableVersion || 'neu')
+      })
+    }
+    if (window.sondraAd?.onUpdateState) {
+      unsub = window.sondraAd.onUpdateState((st) => {
+        if (st?.status === 'downloaded') setUpdateReady(st.availableVersion || 'neu')
+      })
+    }
+    return () => unsub?.()
+  }, [])
 
   return (
-    <footer className="shell mt-[40px] flex flex-col gap-[10px] border-t border-line py-[24px] text-small text-muted">
-      <div className="flex flex-wrap items-center justify-between gap-[16px]">
-        <p className="max-w-[60ch] leading-[1.6]">
-          Sondra AD · Dauerbetrieb für Laptop und Server ({runtimeMode === 'desktop' ? 'Desktop-App mit System-Tray' : 'Hintergrund-Server'}).
+    <>
+      <footer className="shell mt-[40px] flex flex-col gap-[10px] border-t border-line py-[24px] text-small text-muted">
+        <div className="flex flex-wrap items-center justify-between gap-[16px]">
+          <p className="max-w-[60ch] leading-[1.6]">
+            Sondra AD · Dauerbetrieb für Laptop und Server ({runtimeMode === 'desktop' ? 'Desktop-App mit System-Tray' : 'Hintergrund-Server'}).
+          </p>
+          <p className="value text-micro text-muted">
+            <button
+              type="button"
+              onClick={() => setNotesOpen(true)}
+              className="text-ink underline underline-offset-[3px] hover:no-underline"
+            >
+              v{APP_VERSION}
+            </button>{' '}
+            · yt-dlp: {tools?.ytdlpAvailable ? tools.ytdlpVersion || 'bereit' : 'wird bei Bedarf geladen'} · FFmpeg:{' '}
+            {tools?.ffmpegAvailable ? (tools.gpuEncoder ? `GPU (${tools.gpuEncoder})` : 'System') : 'Nativ HLS'} ·{' '}
+            {drive?.connected ? 'Google Drive verbunden' : 'Lokal'}
+          </p>
+        </div>
+        <p className="flex flex-wrap items-center gap-x-[16px] gap-y-[4px]">
+          <button
+            type="button"
+            onClick={() => setNotesOpen(true)}
+            className="text-ink underline underline-offset-[3px] hover:no-underline"
+          >
+            {updateReady ? `Update v${updateReady} installieren` : 'Änderungen & Updates'}
+          </button>
+          <a className="text-ink underline underline-offset-[3px] hover:no-underline" href="./datenschutz.html">
+            Datenschutz
+          </a>
+          <a className="text-ink underline underline-offset-[3px] hover:no-underline" href="./lizenz.html">
+            Lizenzen
+          </a>
         </p>
-        <p className="value text-micro text-muted">
-          v1.0.4 · yt-dlp: {tools?.ytdlpAvailable ? tools.ytdlpVersion || 'bereit' : 'wird bei Bedarf geladen'} · FFmpeg:{' '}
-          {tools?.ffmpegAvailable ? (tools.gpuEncoder ? `GPU (${tools.gpuEncoder})` : 'System') : 'Nativ HLS'} ·{' '}
-          {drive?.connected ? 'Google Drive verbunden' : 'Lokal'}
-        </p>
-      </div>
-      <p className="flex flex-wrap gap-x-[16px] gap-y-[4px]">
-        <a className="text-ink underline underline-offset-[3px] hover:no-underline" href="./datenschutz.html">
-          Datenschutz
-        </a>
-        <a className="text-ink underline underline-offset-[3px] hover:no-underline" href="./lizenz.html">
-          Lizenzen
-        </a>
-      </p>
-    </footer>
+      </footer>
+      <ReleaseNotesDialog open={notesOpen} onClose={() => setNotesOpen(false)} />
+    </>
   )
 }

@@ -52,7 +52,14 @@ export interface SavedLinkItem {
 
 export type PanelId = 'uebersicht' | 'merkliste' | 'warteschlange' | 'speicher' | 'protokoll' | 'einstellungen'
 
-export type StorageTarget = 'drive_only' | 'drive_and_local' | 'local_only'
+export type StorageTarget =
+  | 'drive_only'
+  | 'drive_and_local'
+  | 'local_only'
+  | 'webdav_only'
+  | 'drive_and_webdav'
+export type LocalNamingScheme = 'sondra' | 'jellyfin'
+export type DownloadWindowMode = 'pause_outside' | 'throttle_outside'
 export type BacklogMode = 'from_current' | 'new_only' | 'all_unwatched'
 export type InactivityAction = 'drive_archive' | 'compress_archive' | 'offload_local' | 'pause_series' | 'delete'
 
@@ -70,6 +77,8 @@ export interface SeriesOverride {
   videoPref?: VideoFilePref
   backlogMode?: BacklogMode
   lookaheadLimit?: number
+  maxStorageGb?: number | null
+  airDay?: number | null
   seasonRules?: Record<string, SeasonDownloadRule>
 }
 
@@ -82,8 +91,15 @@ export interface AdConfig {
   merkSyncIntervalMinutes: number
   concurrency: number
   maxBandwidthKbps: number
+  downloadWindowEnabled: boolean
+  downloadWindowStart: string
+  downloadWindowEnd: string
+  downloadWindowMode: DownloadWindowMode
+  daytimeMaxBandwidthKbps: number
 
   language: AniworldLanguagePref
+  languagePriority: AniworldLanguagePref[]
+  autoUpgradeLanguage: boolean
   waitForPreferredLanguage: boolean
   languageWaitFallbackHours: number
   mode: 'video' | 'audio'
@@ -98,8 +114,13 @@ export interface AdConfig {
 
   storageTarget: StorageTarget
   localDir: string
+  localNamingScheme: LocalNamingScheme
   tempDir: string
   localArchiveDir: string
+  webdavUrl: string
+  webdavUsername: string
+  webdavPassword: string
+  webdavBasePath: string
 
   watchStatuses: SavedLinkStatus[]
   backlogMode: BacklogMode
@@ -111,6 +132,7 @@ export interface AdConfig {
   autoRetryOnNetworkRestore: boolean
 
   cleanupEnabled: boolean
+  pauseOnLowSpace: boolean
   maxSondraDriveGb: number
   minFreeDriveGb: number
   minFreeLocalGb: number
@@ -134,6 +156,12 @@ export interface AdConfig {
   notifyOnComplete: boolean
   notifyOnFailure: boolean
   discordWebhookUrl: string
+  telegramBotToken: string
+  telegramChatId: string
+  ntfyUrl: string
+  ntfyToken: string
+  pushoverAppToken: string
+  pushoverUserKey: string
   remoteAccessToken: string
 
   scheduledShutdownEnabled: boolean
@@ -141,16 +169,30 @@ export interface AdConfig {
   scheduledShutdownAction: ShutdownAction
   scheduledShutdownWaitForDownloads: boolean
   scheduledShutdownRepeatDaily: boolean
+  shutdownAfterQueue: boolean
 }
 
 export type ShutdownAction = 'shutdown' | 'sleep' | 'hibernate'
 
 export interface ShutdownState {
   enabled: boolean
+  shutdownAfterQueue: boolean
   action: ShutdownAction
   scheduledAt: number | null
   waitingForDownloads: boolean
   countdownEndsAt: number | null
+}
+
+export interface ReleaseCalendarEntry {
+  seriesId: string
+  title: string
+  status: SavedLinkStatus
+  airDay: number
+  airDaySource: 'manual' | 'inferred'
+  currentSeason: number
+  currentEpisode: number | null
+  downloadedCount: number
+  nextCheckAt: number | null
 }
 
 export interface DriveStatusInfo {
@@ -259,6 +301,8 @@ export interface EpisodeRecord {
   drivePath?: string | null
   localPath?: string | null
   localArchivePath?: string | null
+  webdavPath?: string | null
+  language?: AniworldLanguagePref | null
   hoster?: string
 }
 
@@ -302,6 +346,15 @@ export interface StorageReport {
   }
 }
 
+export interface AppUpdateState {
+  supported: boolean
+  status: 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'up_to_date' | 'error'
+  currentVersion: string
+  availableVersion: string | null
+  progress: number
+  error: string | null
+}
+
 declare global {
   interface Window {
     sondraAd?: {
@@ -311,6 +364,10 @@ declare global {
       hideToTray: () => Promise<boolean>
       getAutostartState: () => Promise<boolean>
       setAutostartState: (enabled: boolean) => Promise<boolean>
+      getUpdateState?: () => Promise<AppUpdateState>
+      checkForUpdates?: () => Promise<AppUpdateState>
+      installUpdate?: () => Promise<boolean>
+      onUpdateState?: (cb: (state: AppUpdateState) => void) => () => void
     }
   }
 }

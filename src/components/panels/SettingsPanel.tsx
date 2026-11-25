@@ -5,7 +5,9 @@ import type {
   AudioFilePref,
   AudioOutputFormat,
   BacklogMode,
+  DownloadWindowMode,
   DriveStatusInfo,
+  LocalNamingScheme,
   SavedLinkStatus,
   ShutdownAction,
   StorageTarget,
@@ -15,6 +17,13 @@ import type {
 import { Button, Card, Dialog, Field, Notice, Reveal, SectionHead, Select, TextInput, Toggle } from '../ui/primitives'
 
 type SettingsSection = 'verbindung' | 'downloads' | 'betrieb' | 'erweitert'
+type PushServiceTab = 'discord' | 'telegram' | 'ntfy' | 'pushover'
+
+const LANG_LABELS: Record<string, string> = {
+  ger_dub: 'Ger-Dub',
+  ger_sub: 'Ger-Sub',
+  eng_sub: 'Eng-Sub',
+}
 
 const SECTIONS: { id: SettingsSection; label: string }[] = [
   { id: 'verbindung', label: 'Verbindung' },
@@ -32,8 +41,11 @@ export function SettingsPanel() {
 
   const updateConfig = useAppStore((s) => s.updateConfig)
   const bootstrap = useAppStore((s) => s.bootstrap)
+  const testPushNotifications = useAppStore((s) => s.testPushNotifications)
+  const testWebdav = useAppStore((s) => s.testWebdav)
 
   const [section, setSection] = useState<SettingsSection>('verbindung')
+  const [pushTab, setPushTab] = useState<PushServiceTab>('discord')
   const [pairDialogMode, setPairDialogMode] = useState<'import' | 'export' | null>(null)
   const [pairError, setPairError] = useState<string | null>(null)
   const [copiedBundle, setCopiedBundle] = useState(false)
@@ -47,6 +59,46 @@ export function SettingsPanel() {
   const [cookiesText, setCookiesText] = useState('')
 
   if (!config) return null
+
+  const moveLangPriority = (index: number, delta: -1 | 1) => {
+    const list = [...(config.languagePriority?.length ? config.languagePriority : (['ger_dub', 'ger_sub', 'eng_sub'] as AniworldLanguagePref[]))]
+    const target = index + delta
+    if (target < 0 || target >= list.length) return
+    const [item] = list.splice(index, 1)
+    list.splice(target, 0, item)
+    void updateConfig({ languagePriority: list })
+  }
+
+  const handleTestPush = async () => {
+    setBusy('test-push')
+    setInfoMsg(null)
+    try {
+      const results = await testPushNotifications()
+      if (results.length === 0) {
+        setInfoMsg('Kein Push-Dienst eingetragen. Bitte zuerst mindestens einen Dienst konfigurieren.')
+      } else {
+        const summary = results.map((r) => `${r.channel}: ${r.ok ? 'OK' : r.error || `HTTP ${r.status}`}`).join(' · ')
+        setInfoMsg(`Test-Meldung gesendet (${summary}).`)
+      }
+    } catch (err) {
+      setInfoMsg(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const handleTestWebdav = async () => {
+    setBusy('test-webdav')
+    setInfoMsg(null)
+    try {
+      const res = await testWebdav()
+      setInfoMsg(res.ok ? `WebDAV erreichbar (${res.url || config.webdavUrl}).` : 'WebDAV-Verbindung fehlgeschlagen.')
+    } catch (err) {
+      setInfoMsg(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(null)
+    }
+  }
 
   const startGoogleSignIn = async () => {
     setBusy('drive-start')
@@ -400,18 +452,63 @@ export function SettingsPanel() {
                 onChange={(e) => void updateConfig({ storageTarget: e.target.value as StorageTarget })}
               >
                 <option value="drive_only">Nur Google Drive (Temp sofort löschen)</option>
-                <option value="drive_and_local">Google Drive + lokale Kopie</option>
-                <option value="local_only">Nur lokal speichern</option>
+                <option value="drive_and_local">Google Drive + Lokal / NAS</option>
+                <option value="local_only">Nur Lokal / NAS (SMB-Pfad möglich)</option>
+                <option value="webdav_only">Nur WebDAV</option>
+                <option value="drive_and_webdav">Google Drive + WebDAV</option>
               </Select>
             </Field>
           </div>
 
-          <Toggle
-            label="Auf Wunschsprache warten"
-            hint="Wartet bei neuen Folgen automatisch, bis die gewählte Sprache verfügbar ist."
-            checked={config.waitForPreferredLanguage}
-            onChange={(val) => void updateConfig({ waitForPreferredLanguage: val })}
-          />
+          <div className="flex flex-col gap-[12px] border-t border-line pt-[18px]">
+            <SectionHead rule={false}>Sprach-Priorität & Auto-Upgrade</SectionHead>
+            <div className="flex flex-wrap items-center gap-[8px]">
+              {(config.languagePriority?.length
+                ? config.languagePriority
+                : (['ger_dub', 'ger_sub', 'eng_sub'] as AniworldLanguagePref[])
+              ).map((lang, idx, arr) => (
+                <div
+                  key={lang}
+                  className="flex items-center gap-[6px] rounded-nav bg-panel-soft px-[10px] py-[6px] text-small text-ink"
+                >
+                  <span className="value text-micro text-muted">{idx + 1}.</span>
+                  <span className="font-medium">{LANG_LABELS[lang] || lang}</span>
+                  <button
+                    type="button"
+                    disabled={idx === 0}
+                    onClick={() => moveLangPriority(idx, -1)}
+                    className="press px-[4px] text-muted hover:text-ink disabled:opacity-30"
+                    title="Höhere Priorität"
+                  >
+                    ←
+                  </button>
+                  <button
+                    type="button"
+                    disabled={idx === arr.length - 1}
+                    onClick={() => moveLangPriority(idx, 1)}
+                    className="press px-[4px] text-muted hover:text-ink disabled:opacity-30"
+                    title="Niedrigere Priorität"
+                  >
+                    →
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="grid grid-cols-1 gap-[12px] sm:grid-cols-2">
+              <Toggle
+                label="Auf Wunschsprache warten"
+                hint="Wartet bei neuen Folgen automatisch, bis die gewählte Sprache verfügbar ist."
+                checked={config.waitForPreferredLanguage}
+                onChange={(val) => void updateConfig({ waitForPreferredLanguage: val })}
+              />
+              <Toggle
+                label="Auto-Upgrade auf bessere Sprache"
+                hint="Lädt zunächst eine verfügbare Sprache und ersetzt die Datei später automatisch durch eine höher priorisierte."
+                checked={Boolean(config.autoUpgradeLanguage)}
+                onChange={(val) => void updateConfig({ autoUpgradeLanguage: val })}
+              />
+            </div>
+          </div>
 
           <div className="grid grid-cols-1 gap-[20px] border-t border-line pt-[18px] sm:grid-cols-2">
             <div className="flex flex-col gap-[8px]">
@@ -452,7 +549,7 @@ export function SettingsPanel() {
 
               <Field
                 label="Vorrats-Limit pro Serie (0 = unbegrenzt)"
-                hint="Einzelne Staffeln lassen sich zusätzlich unter Merkliste → Regeln fein einstellen."
+                hint="Einzelne Staffeln & Speicherbudgets lassen sich unter Merkliste → Regeln einstellen."
               >
                 <TextInput
                   type="number"
@@ -461,12 +558,19 @@ export function SettingsPanel() {
                   onChange={(e) => void updateConfig({ lookaheadLimit: Math.max(0, Number(e.target.value) || 0) })}
                 />
               </Field>
+
+              <Toggle
+                label="Bei zu wenig freiem Speicher automatisch pausieren"
+                hint={`Stoppt Downloads, wenn lokal weniger als ${config.minFreeLocalGb} GB frei sind.`}
+                checked={Boolean(config.pauseOnLowSpace)}
+                onChange={(val) => void updateConfig({ pauseOnLowSpace: val })}
+              />
             </div>
           </div>
 
-          {config.storageTarget !== 'drive_only' ? (
+          {config.storageTarget === 'local_only' || config.storageTarget === 'drive_and_local' ? (
             <div className="grid grid-cols-1 gap-[16px] border-t border-line pt-[18px] sm:grid-cols-2">
-              <Field label="Lokaler Zielordner">
+              <Field label="Lokaler Ordner / NAS-Pfad (SMB)" hint="Auch Netzwerkpfade wie \\\\NAS\\Medien\\Anime sind möglich.">
                 <div className="flex gap-[8px]">
                   <TextInput
                     value={config.localDir}
@@ -480,7 +584,17 @@ export function SettingsPanel() {
                 </div>
               </Field>
 
-              <Field label="Lokaler Archiv-Ordner">
+              <Field label="Ordnerstruktur">
+                <Select
+                  value={config.localNamingScheme || 'sondra'}
+                  onChange={(e) => void updateConfig({ localNamingScheme: e.target.value as LocalNamingScheme })}
+                >
+                  <option value="sondra">Sondra (Serie / Staffel 1 / …)</option>
+                  <option value="jellyfin">Jellyfin & Plex (Serie / Season 01 / …)</option>
+                </Select>
+              </Field>
+
+              <Field label="Lokaler Archiv-Ordner" className="sm:col-span-2">
                 <div className="flex gap-[8px]">
                   <TextInput
                     value={config.localArchiveDir}
@@ -493,6 +607,51 @@ export function SettingsPanel() {
                   ) : null}
                 </div>
               </Field>
+            </div>
+          ) : null}
+
+          {config.storageTarget === 'webdav_only' || config.storageTarget === 'drive_and_webdav' ? (
+            <div className="flex flex-col gap-[14px] border-t border-line pt-[18px]">
+              <div className="flex flex-wrap items-center justify-between gap-[8px]">
+                <SectionHead rule={false}>WebDAV-Ziel (NAS / Nextcloud)</SectionHead>
+                <Button
+                  variant="quiet"
+                  size="sm"
+                  disabled={busy !== null || !config.webdavUrl?.trim()}
+                  onClick={() => void handleTestWebdav()}
+                >
+                  {busy === 'test-webdav' ? 'Prüft …' : 'Verbindung testen'}
+                </Button>
+              </div>
+              <div className="grid grid-cols-1 gap-[14px] sm:grid-cols-2">
+                <Field label="WebDAV-URL">
+                  <TextInput
+                    placeholder="https://nas.local/remote.php/dav/files/name"
+                    value={config.webdavUrl || ''}
+                    onChange={(e) => void updateConfig({ webdavUrl: e.target.value })}
+                  />
+                </Field>
+                <Field label="Zielpfad">
+                  <TextInput
+                    placeholder="/Sondra"
+                    value={config.webdavBasePath || '/Sondra'}
+                    onChange={(e) => void updateConfig({ webdavBasePath: e.target.value })}
+                  />
+                </Field>
+                <Field label="Benutzername">
+                  <TextInput
+                    value={config.webdavUsername || ''}
+                    onChange={(e) => void updateConfig({ webdavUsername: e.target.value })}
+                  />
+                </Field>
+                <Field label="Passwort / App-Passwort">
+                  <TextInput
+                    type="password"
+                    value={config.webdavPassword || ''}
+                    onChange={(e) => void updateConfig({ webdavPassword: e.target.value })}
+                  />
+                </Field>
+              </div>
             </div>
           ) : null}
         </section>
@@ -577,6 +736,56 @@ export function SettingsPanel() {
           </div>
 
           <div className="flex flex-col gap-[14px] border-t border-line pt-[18px]">
+            <SectionHead rule={false}>Download-Zeitfenster / Nachtmodus</SectionHead>
+            <Toggle
+              label="Downloads zeitlich steuern (z. B. nachts volle Leitung, tagsüber gedrosselt)"
+              hint="Schont die Leitung beim Gaming oder Streaming."
+              checked={Boolean(config.downloadWindowEnabled)}
+              onChange={(val) => void updateConfig({ downloadWindowEnabled: val })}
+            />
+            {config.downloadWindowEnabled ? (
+              <div className="grid grid-cols-1 gap-[14px] pt-[2px] sm:grid-cols-2 lg:grid-cols-4">
+                <Field label="Volle Leitung ab">
+                  <TextInput
+                    type="time"
+                    value={config.downloadWindowStart || '23:00'}
+                    onChange={(e) => void updateConfig({ downloadWindowStart: e.target.value || '23:00' })}
+                  />
+                </Field>
+                <Field label="Bis">
+                  <TextInput
+                    type="time"
+                    value={config.downloadWindowEnd || '07:00'}
+                    onChange={(e) => void updateConfig({ downloadWindowEnd: e.target.value || '07:00' })}
+                  />
+                </Field>
+                <Field label="Außerhalb des Fensters">
+                  <Select
+                    value={config.downloadWindowMode || 'throttle_outside'}
+                    onChange={(e) => void updateConfig({ downloadWindowMode: e.target.value as DownloadWindowMode })}
+                  >
+                    <option value="throttle_outside">Bandbreite drosseln</option>
+                    <option value="pause_outside">Downloads pausieren</option>
+                  </Select>
+                </Field>
+                {config.downloadWindowMode !== 'pause_outside' ? (
+                  <Field label="Limit tagsüber (KB/s)">
+                    <TextInput
+                      type="number"
+                      min={50}
+                      step={250}
+                      value={config.daytimeMaxBandwidthKbps ?? 1500}
+                      onChange={(e) =>
+                        void updateConfig({ daytimeMaxBandwidthKbps: Math.max(50, Number(e.target.value) || 1500) })
+                      }
+                    />
+                  </Field>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="flex flex-col gap-[14px] border-t border-line pt-[18px]">
             <SectionHead rule={false}>Geplantes Herunterfahren</SectionHead>
             <Toggle
               label="Gerät zu einer bestimmten Uhrzeit automatisch herunterfahren"
@@ -636,7 +845,12 @@ export function SettingsPanel() {
           </div>
 
           <div className="flex flex-col gap-[14px] border-t border-line pt-[18px]">
-            <SectionHead rule={false}>Benachrichtigungen</SectionHead>
+            <div className="flex flex-wrap items-center justify-between gap-[8px]">
+              <SectionHead rule={false}>Benachrichtigungen & Handy-Push</SectionHead>
+              <Button variant="quiet" size="sm" disabled={busy !== null} onClick={() => void handleTestPush()}>
+                {busy === 'test-push' ? 'Sendet …' : 'Test-Meldung senden'}
+              </Button>
+            </div>
             <div className="grid grid-cols-1 gap-[12px] sm:grid-cols-3">
               <Toggle
                 label="Windows-Meldungen"
@@ -655,13 +869,101 @@ export function SettingsPanel() {
               />
             </div>
 
-            <Field label="Discord-Webhook (optional)">
-              <TextInput
-                placeholder="https://discord.com/api/webhooks/…"
-                value={config.discordWebhookUrl}
-                onChange={(e) => void updateConfig({ discordWebhookUrl: e.target.value })}
-              />
-            </Field>
+            <div className="flex flex-wrap gap-[6px] pt-[2px]">
+              {(
+                [
+                  ['discord', 'Discord', Boolean(config.discordWebhookUrl)],
+                  ['telegram', 'Telegram', Boolean(config.telegramBotToken && config.telegramChatId)],
+                  ['ntfy', 'ntfy', Boolean(config.ntfyUrl)],
+                  ['pushover', 'Pushover', Boolean(config.pushoverAppToken && config.pushoverUserKey)],
+                ] as const
+              ).map(([id, label, configured]) => {
+                const active = pushTab === id
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => setPushTab(id)}
+                    className={`press rounded-pill px-[12px] py-[5px] text-micro font-medium ${
+                      active ? 'bg-ink text-on-ink' : 'bg-panel-soft text-prose hover:text-ink'
+                    }`}
+                  >
+                    {label}
+                    {configured ? ' · aktiv' : ''}
+                  </button>
+                )
+              })}
+            </div>
+
+            {pushTab === 'discord' ? (
+              <Field label="Discord-Webhook (optional)">
+                <TextInput
+                  placeholder="https://discord.com/api/webhooks/…"
+                  value={config.discordWebhookUrl}
+                  onChange={(e) => void updateConfig({ discordWebhookUrl: e.target.value })}
+                />
+              </Field>
+            ) : null}
+
+            {pushTab === 'telegram' ? (
+              <div className="grid grid-cols-1 gap-[14px] sm:grid-cols-2">
+                <Field label="Telegram Bot-Token">
+                  <TextInput
+                    type="password"
+                    placeholder="123456:ABC-DEF…"
+                    value={config.telegramBotToken || ''}
+                    onChange={(e) => void updateConfig({ telegramBotToken: e.target.value })}
+                  />
+                </Field>
+                <Field label="Telegram Chat-ID">
+                  <TextInput
+                    placeholder="z. B. 987654321"
+                    value={config.telegramChatId || ''}
+                    onChange={(e) => void updateConfig({ telegramChatId: e.target.value })}
+                  />
+                </Field>
+              </div>
+            ) : null}
+
+            {pushTab === 'ntfy' ? (
+              <div className="grid grid-cols-1 gap-[14px] sm:grid-cols-2">
+                <Field label="ntfy-Themen-URL">
+                  <TextInput
+                    placeholder="https://ntfy.sh/mein-sondra-thema"
+                    value={config.ntfyUrl || ''}
+                    onChange={(e) => void updateConfig({ ntfyUrl: e.target.value })}
+                  />
+                </Field>
+                <Field label="Zugriffs-Token (optional)">
+                  <TextInput
+                    type="password"
+                    placeholder="tk_…"
+                    value={config.ntfyToken || ''}
+                    onChange={(e) => void updateConfig({ ntfyToken: e.target.value })}
+                  />
+                </Field>
+              </div>
+            ) : null}
+
+            {pushTab === 'pushover' ? (
+              <div className="grid grid-cols-1 gap-[14px] sm:grid-cols-2">
+                <Field label="Pushover App-Token">
+                  <TextInput
+                    type="password"
+                    value={config.pushoverAppToken || ''}
+                    onChange={(e) => void updateConfig({ pushoverAppToken: e.target.value })}
+                  />
+                </Field>
+                <Field label="Pushover User-Key">
+                  <TextInput
+                    type="password"
+                    value={config.pushoverUserKey || ''}
+                    onChange={(e) => void updateConfig({ pushoverUserKey: e.target.value })}
+                  />
+                </Field>
+              </div>
+            ) : null}
           </div>
         </section>
       ) : null}

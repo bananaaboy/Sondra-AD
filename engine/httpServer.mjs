@@ -7,6 +7,8 @@ import { createDriveService } from './driveService.mjs'
 import { createMediaTools } from './mediaTools.mjs'
 import { createDownloaderWorker } from './downloaderWorker.mjs'
 import { createScheduler } from './scheduler.mjs'
+import { dispatchPushNotifications } from './pushNotify.mjs'
+import { testWebdavConnection } from './webdavClient.mjs'
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -205,7 +207,12 @@ export async function createEngineServer({
             queue: store.getQueue(),
             episodeIndex: store.getEpisodeIndex(),
             logs: store.getLogs(400),
+            calendar: scheduler.getReleaseCalendar(),
           })
+        }
+
+        if (route === 'calendar' && req.method === 'GET') {
+          return sendJson(res, 200, { ok: true, calendar: scheduler.getReleaseCalendar() })
         }
 
         if (route === 'config' && req.method === 'POST') {
@@ -219,12 +226,44 @@ export async function createEngineServer({
           if (updated.enabled && !prev.enabled) {
             void worker.pumpQueue()
           }
-          return sendJson(res, 200, { ok: true, config: updated, drive: driveAuth.getStatus(), shutdownState })
+          return sendJson(res, 200, {
+            ok: true,
+            config: updated,
+            drive: driveAuth.getStatus(),
+            shutdownState,
+            calendar: scheduler.getReleaseCalendar(),
+          })
         }
 
         if (route === 'power/cancel-shutdown' && req.method === 'POST') {
           const shutdownState = scheduler.cancelPendingShutdown()
           return sendJson(res, 200, { ok: true, shutdownState, config: store.getConfig() })
+        }
+
+        if (route === 'power/after-queue' && req.method === 'POST') {
+          const shutdownState = scheduler.setShutdownAfterQueue(Boolean(body.enabled))
+          return sendJson(res, 200, { ok: true, shutdownState, config: store.getConfig() })
+        }
+
+        if (route === 'notifications/test' && req.method === 'POST') {
+          const cfg = { ...store.getConfig(), ...(body || {}) }
+          const results = await dispatchPushNotifications(cfg, {
+            title: 'Sondra AD · Test-Meldung',
+            body: 'Push-Benachrichtigungen sind korrekt eingerichtet.',
+            level: 'info',
+          })
+          return sendJson(res, 200, { ok: true, results })
+        }
+
+        if (route === 'storage/test-webdav' && req.method === 'POST') {
+          const cfg = { ...store.getConfig(), ...(body || {}) }
+          const result = await testWebdavConnection({
+            url: cfg.webdavUrl,
+            username: cfg.webdavUsername,
+            password: cfg.webdavPassword,
+            basePath: cfg.webdavBasePath,
+          })
+          return sendJson(res, 200, result)
         }
 
         if (route === 'toggle' && req.method === 'POST') {
