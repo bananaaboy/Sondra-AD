@@ -203,6 +203,7 @@ export function createDriveAuth({
   store,
   vault: externalVault,
   openExternal = null,
+  onConnected = null,
   builtClientId = '',
   builtClientSecret = '',
   endpoints = GOOGLE_ENDPOINTS,
@@ -440,6 +441,9 @@ export function createDriveAuth({
           await finalizeAnswer({ code, state: incomingState }, pendingSession)
           res.setHeader('content-type', 'text/html; charset=utf-8')
           res.end(answerHtml(true))
+          try {
+            onConnected?.()
+          } catch {}
         } catch (err) {
           res.setHeader('content-type', 'text/html; charset=utf-8')
           res.end(answerHtml(false, err?.message))

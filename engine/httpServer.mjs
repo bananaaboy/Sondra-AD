@@ -72,21 +72,30 @@ export async function createEngineServer({
   builtClientId = '',
   builtClientSecret = '',
   onNotify = null,
+  onFocus = null,
   onAutostartChange = null,
   onConfigChange = null,
   fetchImpl = fetch,
 }) {
   const store = createStore(dataDir)
+  let driveService = null
   const driveAuth = createDriveAuth({
     dataDir,
     store,
     vault,
     openExternal,
+    onConnected: () => {
+      onFocus?.()
+      if (driveService) {
+        void driveService.syncMerkliste().catch(() => {})
+        void driveService.heartbeatDeviceRecord().catch(() => {})
+      }
+    },
     builtClientId,
     builtClientSecret,
     fetchImpl,
   })
-  const driveService = createDriveService({
+  driveService = createDriveService({
     dataDir,
     store,
     driveAuth,

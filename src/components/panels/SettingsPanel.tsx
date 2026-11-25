@@ -46,6 +46,13 @@ export function SettingsPanel() {
   const [cookiesText, setCookiesText] = useState('')
 
   useEffect(() => {
+    if (drive?.connected && authDialog) {
+      setAuthDialog(null)
+      setInfoMsg('Google Drive erfolgreich verbunden und mit Sondra synchronisiert.')
+    }
+  }, [drive?.connected, authDialog])
+
+  useEffect(() => {
     if (!('BroadcastChannel' in window)) return undefined
     const channel = new BroadcastChannel('sondra-ad-drive')
     channel.onmessage = () => {
@@ -74,9 +81,13 @@ export function SettingsPanel() {
           openBrowser: isDesktop && openInPopupOrSystem,
         },
       })
-      setAuthDialog({ authUrl: res.authUrl, redirectUri: res.redirectUri, mode: res.mode })
-      if (!isDesktop && openInPopupOrSystem) {
-        window.open(res.authUrl, 'sondra-ad-google', 'popup,width=540,height=700')
+      if (openInPopupOrSystem) {
+        if (!isDesktop) {
+          window.open(res.authUrl, 'sondra-ad-google', 'popup,width=540,height=700')
+        }
+        setInfoMsg('Anmeldung wurde im Browser geöffnet. Bitte dort bei Google bestätigen — Sondra AD verbindet sich danach automatisch.')
+      } else {
+        setAuthDialog({ authUrl: res.authUrl, redirectUri: res.redirectUri, mode: res.mode })
       }
     } catch (err) {
       setInfoMsg(err instanceof Error ? err.message : String(err))
@@ -815,11 +826,11 @@ export function SettingsPanel() {
       <Dialog
         open={authDialog !== null}
         onClose={() => setAuthDialog(null)}
-        title="Mit Google Drive verbinden"
+        title="Mit Google Drive verbinden (QR-Code / Server)"
         size="md"
       >
         {authDialog ? (
-          <div className="flex flex-col gap-[20px]">
+          <div className="flex flex-col gap-[18px]">
             <div className="grid grid-cols-1 items-center gap-[20px] sm:grid-cols-[160px_1fr]">
               {qrMatrix ? (
                 <div className="mx-auto rounded-card bg-raised p-[12px] ring-1 ring-line">
@@ -837,9 +848,12 @@ export function SettingsPanel() {
                 </div>
               ) : null}
 
-              <div className="flex flex-col gap-[10px]">
+              <div className="flex flex-col gap-[8px]">
                 <p className="text-small text-prose">
-                  Öffnen Sie die Anmeldeseite im Browser oder scannen Sie den QR-Code:
+                  Auf demselben PC einfach <strong>„Im Browser öffnen“</strong> klicken — dann klappt die Rückmeldung automatisch.
+                </p>
+                <p className="text-micro text-muted">
+                  Auf einem Handy oder zweiten Gerät: QR-Code scannen und bei Google zulassen. Danach zeigt das Handy kurz eine „127.0.0.1 nicht erreichbar“-Seite (das ist bei Google-Desktop-Anmeldungen normal). Kopiere diese komplette Adresse aus der Handy-Adresszeile und füge sie unten ein.
                 </p>
                 <TextInput readOnly value={authDialog.authUrl} onFocus={(e) => e.currentTarget.select()} />
                 <div>
@@ -848,17 +862,17 @@ export function SettingsPanel() {
                     size="sm"
                     onClick={() => window.open(authDialog.authUrl, '_blank', 'noopener')}
                   >
-                    Im Browser öffnen
+                    Im Browser auf diesem PC öffnen
                   </Button>
                 </div>
               </div>
             </div>
 
             <form onSubmit={(e) => void finishManualCallback(e)} className="flex flex-col gap-[10px] border-t border-line pt-[14px]">
-              <SectionHead rule={false}>Für Server: Rückgabe-Adresse oder Code einfügen</SectionHead>
+              <SectionHead rule={false}>Rückgabe-Adresse vom Handy / zweiten Gerät einfügen</SectionHead>
               <div className="flex flex-col gap-[8px] sm:flex-row">
                 <TextInput
-                  placeholder="http://127.0.0.1:…/?code=… oder Autorisierungscode"
+                  placeholder="http://127.0.0.1:…/?state=…&code=…"
                   value={callbackInput}
                   onChange={(e) => setCallbackInput(e.target.value)}
                   className="flex-1"

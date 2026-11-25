@@ -273,6 +273,7 @@ async function boot() {
       decrypt: (buf) => safeStorage.decryptString(buf),
     },
     openExternal: (url) => shell.openExternal(url),
+    onFocus: () => showMainWindow(),
     builtClientId: BUILT_GOOGLE.clientId,
     builtClientSecret: BUILT_GOOGLE.clientSecret,
     onNotify: ({ title, body }) => {
