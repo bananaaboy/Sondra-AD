@@ -805,7 +805,7 @@ SOFTWARE.`}</pre>
           <p className="max-w-[60ch] leading-[1.6]">
             Sondra AD · Automatischer Hintergrund-Downloader für Windows (Microsoft Store & .exe) und Server.
           </p>
-          <p className="value text-micro text-muted">v1.0.0 · keine Cookies · kein Tracking · MIT-Lizenz</p>
+          <p className="value text-micro text-muted">v1.0.1 · keine Cookies · kein Tracking · MIT-Lizenz</p>
         </div>
         <p className="flex flex-wrap gap-x-[16px] gap-y-[4px]">
           <button
