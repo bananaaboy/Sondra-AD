@@ -7,6 +7,7 @@ import { createDriveService } from './driveService.mjs'
 import { createMediaTools } from './mediaTools.mjs'
 import { createDownloaderWorker } from './downloaderWorker.mjs'
 import { createScheduler } from './scheduler.mjs'
+import { createCalendarStore } from './calendar.mjs'
 import { dispatchPushNotifications } from './pushNotify.mjs'
 import { testWebdavConnection } from './webdavClient.mjs'
 
@@ -116,12 +117,14 @@ export async function createEngineServer({
     mediaTools,
     onNotify,
   })
+  const calendarStore = createCalendarStore({ dataDir, store })
   const scheduler = createScheduler({
     store,
     driveAuth,
     driveService,
     mediaTools,
     worker,
+    calendarStore,
     onNotify,
     ...(onPowerAction ? { onPowerAction } : {}),
   })
@@ -143,6 +146,7 @@ export async function createEngineServer({
   store.events.on('log', (log) => broadcastSse('log', log))
   store.events.on('status', (st) => broadcastSse('status', st))
   store.events.on('change', (chg) => broadcastSse('change', chg))
+  store.events.on('reminder', (line) => broadcastSse('reminder', line))
 
   const sseHeartbeat = setInterval(() => {
     for (const client of sseClients) {
@@ -207,12 +211,31 @@ export async function createEngineServer({
             queue: store.getQueue(),
             episodeIndex: store.getEpisodeIndex(),
             logs: store.getLogs(400),
-            calendar: scheduler.getReleaseCalendar(),
+            calendar: calendarStore.snapshot(),
           })
         }
 
         if (route === 'calendar' && req.method === 'GET') {
-          return sendJson(res, 200, { ok: true, calendar: scheduler.getReleaseCalendar() })
+          return sendJson(res, 200, { ok: true, calendar: calendarStore.snapshot() })
+        }
+
+        if (route === 'calendar/event' && req.method === 'POST') {
+          const saved = calendarStore.saveEvent(body.event || {})
+          if (!saved) return sendJson(res, 400, { ok: false, error: 'Der Eintrag konnte nicht gespeichert werden.' })
+          return sendJson(res, 200, { ok: true, event: saved, calendar: calendarStore.snapshot() })
+        }
+
+        if (route === 'calendar/event/delete' && req.method === 'POST') {
+          calendarStore.deleteEvent(String(body.id || ''))
+          return sendJson(res, 200, { ok: true, calendar: calendarStore.snapshot() })
+        }
+
+        if (route === 'calendar/airing' && req.method === 'POST') {
+          const seriesId = String(body.seriesId || '')
+          if (!seriesId) return sendJson(res, 400, { ok: false, error: 'seriesId fehlt' })
+          const result = calendarStore.setAiring(seriesId, body.airing || null)
+          if (body.airing && !result) return sendJson(res, 400, { ok: false, error: 'Ungültiger Sendetag.' })
+          return sendJson(res, 200, { ok: true, calendar: calendarStore.snapshot() })
         }
 
         if (route === 'config' && req.method === 'POST') {
@@ -231,7 +254,6 @@ export async function createEngineServer({
             config: updated,
             drive: driveAuth.getStatus(),
             shutdownState,
-            calendar: scheduler.getReleaseCalendar(),
           })
         }
 

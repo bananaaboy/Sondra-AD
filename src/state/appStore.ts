@@ -6,7 +6,6 @@ import type {
   LogRecord,
   PanelId,
   QueueJob,
-  ReleaseCalendarEntry,
   SavedLinkItem,
   SeriesOverride,
   ShutdownState,
@@ -59,6 +58,7 @@ export async function apiCall<T = Record<string, unknown>>(
 const SLUGS: Record<PanelId, string> = {
   uebersicht: '',
   merkliste: '#merkliste',
+  kalender: '#kalender',
   warteschlange: '#warteschlange',
   speicher: '#speicher',
   protokoll: '#protokoll',
@@ -68,6 +68,7 @@ const SLUGS: Record<PanelId, string> = {
 export function panelFromHash(hash: string): PanelId {
   const clean = hash.replace(/^#/, '').trim().toLowerCase()
   if (clean === 'merkliste') return 'merkliste'
+  if (clean === 'kalender') return 'kalender'
   if (clean === 'warteschlange') return 'warteschlange'
   if (clean === 'speicher') return 'speicher'
   if (clean === 'protokoll') return 'protokoll'
@@ -76,6 +77,7 @@ export function panelFromHash(hash: string): PanelId {
 }
 
 import { IN_ELECTRON_APP } from '../lib/downloads'
+import { EMPTY_CALENDAR, type Airing, type CalEvent, type CalendarSnapshot } from '../lib/calendar'
 
 export type SurfaceMode = 'loading' | 'app' | 'website'
 
@@ -108,7 +110,9 @@ export interface AppState {
   queue: QueueJob[]
   episodeIndex: { downloaded: Record<string, EpisodeRecord>; archived: Record<string, EpisodeRecord> }
   logs: LogRecord[]
-  calendar: ReleaseCalendarEntry[]
+  calendar: CalendarSnapshot
+  /** Fällige Erinnerungen aus dem Kalender, unten im Fenster, bis „OK“. */
+  reminderLines: { key: string; title: string; body: string }[]
   storage: StorageReport | null
   loadingStorage: boolean
 
@@ -116,6 +120,10 @@ export interface AppState {
   bootstrap: () => Promise<void>
   refreshStorage: () => Promise<void>
   refreshCalendar: () => Promise<void>
+  saveCalendarEvent: (event: Partial<CalEvent>) => Promise<CalEvent>
+  deleteCalendarEvent: (id: string) => Promise<void>
+  setSeriesAiring: (seriesId: string, airing: Airing | null) => Promise<void>
+  dismissReminder: (key: string) => void
   updateConfig: (patch: Partial<AdConfig>) => Promise<void>
   toggleEngine: (enabled?: boolean) => Promise<void>
   cancelPendingShutdown: () => Promise<void>
@@ -146,7 +154,7 @@ export interface AppState {
   clearLogs: () => Promise<void>
 }
 
-const PANEL_ORDER: PanelId[] = ['uebersicht', 'merkliste', 'warteschlange', 'speicher', 'protokoll', 'einstellungen']
+const PANEL_ORDER: PanelId[] = ['uebersicht', 'merkliste', 'kalender', 'warteschlange', 'speicher', 'protokoll', 'einstellungen']
 
 export const useAppStore = create<AppState>((set, get) => ({
   surfaceMode: initialSurfaceMode(),
@@ -168,7 +176,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   queue: [],
   episodeIndex: { downloaded: {}, archived: {} },
   logs: [],
-  calendar: [],
+  calendar: EMPTY_CALENDAR,
+  reminderLines: [],
   storage: null,
   loadingStorage: false,
 
@@ -218,7 +227,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         queue: QueueJob[]
         episodeIndex: { downloaded: Record<string, EpisodeRecord>; archived: Record<string, EpisodeRecord> }
         logs: LogRecord[]
-        calendar?: ReleaseCalendarEntry[]
+        calendar?: CalendarSnapshot
       }
       if (!data || typeof data !== 'object' || !data.config) {
         if (IN_ELECTRON_APP) {
@@ -246,7 +255,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         queue: data.queue,
         episodeIndex: data.episodeIndex,
         logs: data.logs,
-        calendar: data.calendar ?? [],
+        calendar: data.calendar ?? EMPTY_CALENDAR,
       })
       void get().refreshStorage()
     } catch (err) {
@@ -273,9 +282,29 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   refreshCalendar: async () => {
     try {
-      const res = await apiCall<{ calendar: ReleaseCalendarEntry[] }>('calendar')
-      set({ calendar: res.calendar ?? [] })
+      const res = await apiCall<{ calendar: CalendarSnapshot }>('calendar')
+      set({ calendar: res.calendar ?? EMPTY_CALENDAR })
     } catch {}
+  },
+
+  saveCalendarEvent: async (event) => {
+    const res = await apiCall<{ event: CalEvent; calendar: CalendarSnapshot }>('calendar/event', { body: { event } })
+    set({ calendar: res.calendar })
+    return res.event
+  },
+
+  deleteCalendarEvent: async (id) => {
+    const res = await apiCall<{ calendar: CalendarSnapshot }>('calendar/event/delete', { body: { id } })
+    set({ calendar: res.calendar })
+  },
+
+  setSeriesAiring: async (seriesId, airing) => {
+    const res = await apiCall<{ calendar: CalendarSnapshot }>('calendar/airing', { body: { seriesId, airing } })
+    set({ calendar: res.calendar })
+  },
+
+  dismissReminder: (key) => {
+    set((state) => ({ reminderLines: state.reminderLines.filter((line) => line.key !== key) }))
   },
 
   updateConfig: async (patch) => {
@@ -285,7 +314,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       config: AdConfig
       drive: DriveStatusInfo
       shutdownState?: ShutdownState
-      calendar?: ReleaseCalendarEntry[]
     }>('config', {
       body: patch,
     })
@@ -293,7 +321,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       config: res.config,
       drive: res.drive,
       ...(res.shutdownState ? { shutdownState: res.shutdownState } : {}),
-      ...(res.calendar ? { calendar: res.calendar } : {}),
     })
   },
 
@@ -499,11 +526,22 @@ export function connectLiveEvents(): () => void {
       } catch {}
     })
 
+    es.addEventListener('reminder', (ev) => {
+      try {
+        const line = JSON.parse((ev as MessageEvent).data) as { key: string; title: string; body: string }
+        useAppStore.setState((s) => ({
+          reminderLines: [...s.reminderLines.filter((l) => l.key !== line.key), line].slice(-3),
+        }))
+      } catch {}
+    })
+
     es.addEventListener('change', (ev) => {
       try {
         const chg = JSON.parse((ev as MessageEvent).data) as { type?: string; id?: string }
         if (chg.type === 'merkliste' || chg.type === 'drive-auth' || chg.type === 'episodes' || chg.type === 'config') {
           void useAppStore.getState().bootstrap()
+        } else if (chg.type === 'calendar') {
+          void useAppStore.getState().refreshCalendar()
         } else if (chg.type === 'logs-cleared') {
           useAppStore.setState({ logs: [] })
         } else if (chg.type === 'logs-updated' && chg.id) {

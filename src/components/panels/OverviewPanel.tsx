@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useAppStore } from '../../state/appStore'
 import { episodeLabel, formatBytes, formatEta, formatRelativeTime, formatSpeed } from '../../lib/format'
 import { Button, Card, Notice, Progress, RowMark, SectionHead, Stat } from '../ui/primitives'
+import { itemsOn, merkItemsForCalendar, todayYmd } from '../../lib/calendar'
 
 export function OverviewPanel() {
   const config = useAppStore((s) => s.config)
@@ -18,6 +19,16 @@ export function OverviewPanel() {
   const checkNow = useAppStore((s) => s.checkNow)
   const toggleEngine = useAppStore((s) => s.toggleEngine)
   const setPanel = useAppStore((s) => s.setPanel)
+  const calendar = useAppStore((s) => s.calendar)
+  // Wie die Kalender-Kachel auf der Startseite von Sondra.
+  const todays = itemsOn(
+    todayYmd(),
+    calendar.events,
+    merkItemsForCalendar(merkItems, calendar.airing),
+  )
+  const calendarLine = todays.length
+    ? `Heute: ${todays[0].time ? `${todays[0].time} ` : ''}${todays[0].title}${todays.length > 1 ? ` und ${todays.length - 1} weitere` : ''}`
+    : 'Sendetage und eigene Termine'
   const retryAllFailed = useAppStore((s) => s.retryAllFailed)
   const removeHistoryEntry = useAppStore((s) => s.removeHistoryEntry)
   const clearDownloadHistory = useAppStore((s) => s.clearDownloadHistory)
@@ -143,6 +154,20 @@ export function OverviewPanel() {
           </p>
         </Card>
       ) : null}
+
+      <button
+        type="button"
+        onClick={() => setPanel('kalender')}
+        className="rise press flex min-w-0 items-center justify-between gap-[12px] rounded-card bg-panel-soft p-[14px] text-left ring-1 ring-inset ring-line transition-colors duration-[var(--dur-fast)] hover:bg-panel-mid"
+      >
+        <span className="flex min-w-0 flex-col">
+          <span className="text-small font-semibold text-ink">Kalender</span>
+          <span className="truncate text-small text-prose">{calendarLine}</span>
+        </span>
+        <span aria-hidden className="text-muted">
+          ›
+        </span>
+      </button>
 
       <div className="grid grid-cols-1 gap-[28px] lg:grid-cols-2">
         <section className="flex flex-col">

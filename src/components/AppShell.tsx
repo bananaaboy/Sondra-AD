@@ -71,6 +71,7 @@ export function Logo({ onClick }: { onClick?: () => void }) {
 export const PANELS: { id: PanelId; label: string; summary: string }[] = [
   { id: 'uebersicht', label: 'Übersicht', summary: 'Status, nächste Prüfung, aktive Downloads und Speicherstand' },
   { id: 'merkliste', label: 'Merkliste', summary: 'Serien überwachen, Stand abgleichen und Einzelregeln festlegen' },
+  { id: 'kalender', label: 'Kalender', summary: 'Die Woche auf einen Blick: Sendetage Ihrer Serien und eigene Termine mit Erinnerung' },
   { id: 'warteschlange', label: 'Warteschlange', summary: 'Laufende Downloads, Wiederholungen und manuelle Adressen' },
   { id: 'speicher', label: 'Speicher & Archiv', summary: 'Löschgrenzen, Google-Drive-Kontingent und Inaktivitäts-Archiv' },
   { id: 'protokoll', label: 'Protokoll', summary: 'Lückenloses Verzeichnis aller Prüfungen, Hoster-Wechsel und Fehler' },

@@ -82,6 +82,7 @@ export function defaultConfig(dataDir) {
     desktopNotifications: true,
     notifyOnComplete: true,
     notifyOnFailure: true,
+    notifyOnReminder: true,
     discordWebhookUrl: '',
     telegramBotToken: '',
     telegramChatId: '',

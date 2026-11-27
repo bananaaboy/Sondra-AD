@@ -12,6 +12,7 @@ Sondra AD verbindet sich mit demselben `Sondra`-Ordner in Google Drive (`drive.f
 |---|---|
 | **Übersicht** | Laufzeitstatus, letzte und nächste Prüfung, verbundene Sondra-Geräte, aktive Downloads, Speicherbelegung und letzte Ereignisse |
 | **Merkliste** | Serien aus `Sondra-Merkliste.sqlite`, Einzelprüfung, Hinzufügen neuer Serien sowie serienbezogene Regeln für Sprache, Modus und Vorausladen |
+| **Kalender** | Derselbe Wochenkalender wie in Sondra: Sendetage Ihrer Serien und eigene Termine mit Uhrzeit, Wiederholung und Erinnerung – erinnert wird vom Hintergrunddienst, auch bei geschlossenem Fenster |
 | **Warteschlange** | Laufende Downloads und Resumable-Uploads, Hoster-Wechsel, Sprach-Warteliste, Wiederholungszähler, Pause, Sofort-Wiederholung und manueller Link-Einwurf |
 | **Speicher & Archiv** | Grenzwerte für Google Drive und lokale Datenträger, automatisches Löschen gesehener Folgen, Inaktivitäts-Regeln, Archiv-Verwaltung und Wiederherstellung |
 | **Protokoll** | Durchsuchbares Ereignisprotokoll (`logs.jsonl`) für Downloads, Hoster-Fallbacks, Fehlversuche, Synchronisation, Speicherbereinigung und Archivierung |

@@ -50,7 +50,7 @@ export interface SavedLinkItem {
   onlineAvailable?: OnlineAvailableInfo
 }
 
-export type PanelId = 'uebersicht' | 'merkliste' | 'warteschlange' | 'speicher' | 'protokoll' | 'einstellungen'
+export type PanelId = 'uebersicht' | 'merkliste' | 'kalender' | 'warteschlange' | 'speicher' | 'protokoll' | 'einstellungen'
 
 export type StorageTarget =
   | 'drive_only'
@@ -78,6 +78,7 @@ export interface SeriesOverride {
   backlogMode?: BacklogMode
   lookaheadLimit?: number
   maxStorageGb?: number | null
+  /** Veraltet: früherer „Ausstrahlungstag“ des Wochenplans, wird beim Start in den Kalender übernommen. */
   airDay?: number | null
   seasonRules?: Record<string, SeasonDownloadRule>
 }
@@ -155,6 +156,7 @@ export interface AdConfig {
   desktopNotifications: boolean
   notifyOnComplete: boolean
   notifyOnFailure: boolean
+  notifyOnReminder: boolean
   discordWebhookUrl: string
   telegramBotToken: string
   telegramChatId: string
@@ -181,18 +183,6 @@ export interface ShutdownState {
   scheduledAt: number | null
   waitingForDownloads: boolean
   countdownEndsAt: number | null
-}
-
-export interface ReleaseCalendarEntry {
-  seriesId: string
-  title: string
-  status: SavedLinkStatus
-  airDay: number
-  airDaySource: 'manual' | 'inferred'
-  currentSeason: number
-  currentEpisode: number | null
-  downloadedCount: number
-  nextCheckAt: number | null
 }
 
 export interface DriveStatusInfo {

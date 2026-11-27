@@ -7,6 +7,8 @@ import { WhatsNewDialog, WhatsNewLine } from './components/WhatsNew'
 import { WebsiteView } from './components/WebsiteView'
 import { OverviewPanel } from './components/panels/OverviewPanel'
 import { WatchlistPanel } from './components/panels/WatchlistPanel'
+import { CalendarPanel } from './components/panels/CalendarPanel'
+import { ReminderLines } from './components/ReminderLines'
 import { QueuePanel } from './components/panels/QueuePanel'
 import { StorageArchivePanel } from './components/panels/StorageArchivePanel'
 import { LogsPanel } from './components/panels/LogsPanel'
@@ -143,6 +145,7 @@ export function App() {
           >
             {panel === 'uebersicht' ? <OverviewPanel /> : null}
             {panel === 'merkliste' ? <WatchlistPanel /> : null}
+            {panel === 'kalender' ? <CalendarPanel /> : null}
             {panel === 'warteschlange' ? <QueuePanel /> : null}
             {panel === 'speicher' ? <StorageArchivePanel /> : null}
             {panel === 'protokoll' ? <LogsPanel /> : null}
@@ -153,6 +156,7 @@ export function App() {
 
       <Footer />
       <WhatsNewDialog />
+      {ready ? <ReminderLines /> : null}
     </div>
   )
 }

@@ -851,7 +851,7 @@ export function SettingsPanel() {
                 {busy === 'test-push' ? 'Sendet …' : 'Test-Meldung senden'}
               </Button>
             </div>
-            <div className="grid grid-cols-1 gap-[12px] sm:grid-cols-3">
+            <div className="grid grid-cols-1 gap-[12px] sm:grid-cols-2 lg:grid-cols-4">
               <Toggle
                 label="Windows-Meldungen"
                 checked={config.desktopNotifications}
@@ -866,6 +866,11 @@ export function SettingsPanel() {
                 label="Bei Fehlern warnen"
                 checked={config.notifyOnFailure}
                 onChange={(val) => void updateConfig({ notifyOnFailure: val })}
+              />
+              <Toggle
+                label="Erinnerungen aus dem Kalender"
+                checked={config.notifyOnReminder !== false}
+                onChange={(val) => void updateConfig({ notifyOnReminder: val })}
               />
             </div>
 

@@ -25,55 +25,8 @@ import {
   localSeriesFolderName,
 } from '../shared/merklisteMerge.mjs'
 import { sniffMediaFile } from './mediaCheck.mjs'
+import { dispatchPushNotifications } from './pushNotify.mjs'
 import { resolveBindIpv4 } from './mediaTools.mjs'
-
-export function buildReleaseCalendar(merkItems, config, episodeIndex, nextCheckAt = null) {
-  const downloaded = episodeIndex?.downloaded || {}
-  const overrides = config?.seriesOverrides || {}
-  const entries = []
-
-  for (const item of merkItems || []) {
-    if (!item || item.status === 'dropped' || item.status === 'paused') continue
-    const ov = overrides[item.id] || {}
-    if (ov.enabled === false) continue
-
-    let latestDlAt = 0
-    let downloadedCount = 0
-    for (const rec of Object.values(downloaded)) {
-      if (rec && rec.seriesId === item.id) {
-        downloadedCount += 1
-        if (typeof rec.at === 'number' && rec.at > latestDlAt) {
-          latestDlAt = rec.at
-        }
-      }
-    }
-
-    let airDay = null
-    let airDaySource = 'inferred'
-    if (typeof ov.airDay === 'number' && ov.airDay >= 0 && ov.airDay <= 6) {
-      airDay = ov.airDay
-      airDaySource = 'manual'
-    } else {
-      const refTs = latestDlAt || item.onlineAvailable?.checkedAt || item.updatedAt || Date.now()
-      airDay = new Date(refTs).getDay()
-      airDaySource = 'inferred'
-    }
-
-    entries.push({
-      seriesId: item.id,
-      title: item.title,
-      status: item.status || 'watching',
-      airDay,
-      airDaySource,
-      currentSeason: item.season || 1,
-      currentEpisode: typeof item.episode === 'number' ? item.episode : null,
-      downloadedCount,
-      nextCheckAt,
-    })
-  }
-
-  return entries
-}
 
 export function computeNextShutdownAt(timeStr, nowMs = Date.now()) {
   const m = /^(\d{1,2}):(\d{2})$/.exec(String(timeStr || '').trim())
@@ -123,6 +76,7 @@ export function createScheduler({
   driveService,
   mediaTools,
   worker,
+  calendarStore = null,
   onNotify = null,
   onPowerAction = defaultExecuteSystemPowerAction,
 }) {
@@ -1438,9 +1392,27 @@ export function createScheduler({
     return { upgraded }
   }
 
-  function getReleaseCalendar() {
-    const meta = store.getMerkMeta()
-    return buildReleaseCalendar(store.getMerkItems(), store.getConfig(), store.getEpisodeIndex(), meta.nextCheckAt || null)
+  /**
+   * Erinnerungen aus dem Kalender: läuft bei jedem Takt, auch wenn die automatischen
+   * Downloads pausiert sind. Jede fällige Erinnerung erscheint im offenen Fenster, als
+   * Windows-Benachrichtigung und – falls eingerichtet – auf dem Handy (Discord, Telegram …).
+   */
+  function remindFromCalendar(now = new Date()) {
+    if (!calendarStore) return []
+    const due = calendarStore.takeDueReminders(now)
+    if (due.length === 0) return due
+    const cfg = store.getConfig()
+    for (const entry of due) {
+      store.events.emit('reminder', { key: entry.key, title: entry.title, body: entry.body })
+      if (cfg.notifyOnReminder === false) continue
+      if (cfg.desktopNotifications && onNotify) {
+        try {
+          onNotify({ title: entry.title, body: entry.body })
+        } catch {}
+      }
+      void dispatchPushNotifications(cfg, { title: entry.title, body: entry.body }).catch(() => {})
+    }
+    return due
   }
 
   worker.setOnQueueIdle?.(() => {
@@ -1452,6 +1424,9 @@ export function createScheduler({
     const now = Date.now()
 
     checkScheduledShutdown(now)
+    try {
+      remindFromCalendar(new Date(now))
+    } catch {}
 
     if (!shutdownWaitingForDownloads && !shutdownCountdownEndsAt) {
       await worker.pumpQueue()
@@ -1543,7 +1518,7 @@ export function createScheduler({
     checkScheduledShutdown,
     cancelPendingShutdown,
     runLanguageUpgradeCheck,
-    getReleaseCalendar,
+    remindFromCalendar,
     runCheckCycle,
     enqueueManualUrl,
     runStorageCleanup,

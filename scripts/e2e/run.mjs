@@ -241,7 +241,7 @@ async function runE2E() {
     await page.waitForSelector('h1:has-text("Sondra")')
 
     const tabCount = await page.locator('[data-tab]').count()
-    assert.equal(tabCount, 6)
+    assert.equal(tabCount, 7)
 
     const driveBtnDots = await page.locator('header button:has-text("Drive") span.rounded-pill').count()
     assert.equal(driveBtnDots, 0)
@@ -268,9 +268,33 @@ async function runE2E() {
     await page.waitForSelector('dialog:has-text("Staffel 2")')
     await page.click('dialog button:has-text("Regeln übernehmen")')
 
-    await page.click('button:has-text("Wochenplan")')
-    await page.waitForSelector('text=Montag')
-    await page.click('button:has-text("Liste")')
+    // Kalender wie in Sondra: Woche ab Montag, eigener Termin, Serie mit Sendetag.
+    await page.click('[data-tab][data-panel="kalender"]')
+    await page.waitForSelector('h2:has-text("Kalender")')
+    assert.equal(await page.locator('section[aria-label^="Montag"]').count(), 1)
+    await page.waitForSelector('text=Diese Woche ist leer.')
+    await page.click('button:has-text("Termin eintragen")')
+    await page.waitForSelector('dialog:has-text("Neuer Eintrag")')
+    await page.fill('dialog label:has-text("Name") input', 'Filmabend')
+    await page.fill('dialog label:has-text("Uhrzeit") input', '19:30')
+    await page.click('dialog button:has-text("Eintragen")')
+    await page.waitForSelector('section button:has-text("Filmabend")')
+    await page.waitForSelector('section button:has-text("19:30")')
+    await page.click('section button:has-text("Filmabend")')
+    await page.waitForSelector('dialog:has-text("Eintrag ändern")')
+    await page.keyboard.press('Escape')
+    await page.click('button:text-is("Eintrag")')
+    await page.click('dialog button[role="radio"]:has-text("Serie, die jede Woche läuft")')
+    await page.selectOption('dialog label:has-text("Wochentag") select', '0')
+    await page.click('dialog button:has-text("Eintragen")')
+    await page.waitForSelector('section[aria-label^="Montag"] button:has-text("Dandadan")')
+    await page.screenshot({ path: path.join(workDir, 'kalender.png') })
+    if (process.env.SONDRA_E2E_SHOTS) {
+      fs.copyFileSync(path.join(workDir, 'kalender.png'), path.join(process.env.SONDRA_E2E_SHOTS, 'kalender.png'))
+    }
+
+    await page.click('[data-tab][data-panel="merkliste"]')
+    await page.waitForSelector('h2:has-text("Merkliste")')
 
     await page.click('button:has-text("Verlauf")')
     await page.waitForSelector('dialog:has-text("Zuletzt geschaut (Verlauf)")')

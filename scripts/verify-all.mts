@@ -30,6 +30,15 @@ import {
   sharedSqliteBytes,
 } from '../shared/merklisteMerge.mjs'
 import { sniffMediaBuffer } from '../engine/mediaCheck.mjs'
+import {
+  addDays as calAddDays,
+  createCalendarStore,
+  itemsOn as calItemsOn,
+  normalizeEvent as normalizeCalEvent,
+  occursOn as calOccursOn,
+  weekdayOf as calWeekdayOf,
+} from '../engine/calendar.mjs'
+import { EventEmitter } from 'node:events'
 import { spawnSync } from 'node:child_process'
 import { buildTrayIconPng } from '../desktop/trayIcon.mjs'
 import { makeStoreTiles } from './store-tiles.mjs'
@@ -798,7 +807,7 @@ async function main() {
     assert.deepEqual(triggeredPowerActions, ['shutdown'])
     assert.equal(engine.store.getConfig().scheduledShutdownEnabled, false)
 
-    console.log('11. Prüfe Zeitfenster, Nach-Queue-Shutdown, Wochenplan, Push-Dienste & WebDAV …')
+    console.log('11. Prüfe Zeitfenster, Nach-Queue-Shutdown, Kalender mit Erinnerungen, Push-Dienste & WebDAV …')
     const at0200 = new Date(2026, 4, 11, 2, 0, 0, 0).getTime()
     const at1400 = new Date(2026, 4, 11, 14, 0, 0, 0).getTime()
     assert.equal(isInsideTimeWindow('23:00', '07:00', at0200), true)
@@ -862,12 +871,73 @@ async function main() {
         },
       },
     })
+    // Kalender wie in Sondra: Tage ab Montag, Termine mit Wiederholung, Sendetage nie geschätzt.
+    assert.equal(calAddDays('2026-03-28', 1), '2026-03-29')
+    assert.equal(calAddDays('2026-10-24', 7), '2026-10-31')
+    assert.equal(calWeekdayOf('2026-11-23'), 0)
+    assert.equal(calWeekdayOf('2026-11-29'), 6)
+    assert.equal(calOccursOn({ date: '2026-10-19', repeat: 'weekly' }, '2026-10-26'), true)
+    assert.equal(calOccursOn({ date: '2026-10-19', repeat: 'weekly' }, '2026-10-27'), false)
+    assert.equal(calOccursOn({ date: '2026-10-19', repeat: 'none' }, '2026-10-18'), false)
+    assert.equal(normalizeCalEvent({ title: 'X', date: '2026-02-30' }), null)
+    assert.equal(normalizeCalEvent({ title: 'X', date: '2026-02-03', remind: 10 })?.remind, undefined)
+    const onFriday = calItemsOn('2026-11-27', [], [
+      { id: 'a', title: 'Läuft', status: 'watching', airing: { weekday: 4, time: '20:00' } },
+      { id: 'b', title: 'Später', status: 'later', airing: { weekday: 4 } },
+      { id: 'c', title: 'Ohne Tag', status: 'watching' },
+    ])
+    assert.deepEqual(onFriday.map((i) => i.title), ['Läuft'])
+
     const calRes = await fetch(`${engine.url}api/ad/calendar`).then((r) => r.json())
     assert.equal(calRes.ok, true)
-    const frierenCal = calRes.calendar.find((c) => c.seriesId === 'frieren-id')
-    assert.ok(frierenCal)
-    assert.equal(frierenCal.airDay, 5)
-    assert.equal(frierenCal.airDaySource, 'manual')
+    assert.deepEqual(calRes.calendar.events, [])
+    const airRes = await fetch(`${engine.url}api/ad/calendar/airing`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ seriesId: 'frieren-id', airing: { weekday: 4, time: '20:00', remind: 10 } }),
+    }).then((r) => r.json())
+    assert.deepEqual(airRes.calendar.airing['frieren-id'], { weekday: 4, time: '20:00', remind: 10 })
+    const badEvent = await fetch(`${engine.url}api/ad/calendar/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ event: { title: '', date: '2026-11-27' } }),
+    })
+    assert.equal(badEvent.status, 400)
+    const evRes = await fetch(`${engine.url}api/ad/calendar/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ event: { title: 'Filmabend', date: '2026-11-20', time: '19:00', repeat: 'weekly', remind: 30 } }),
+    }).then((r) => r.json())
+    assert.equal(evRes.ok, true)
+    assert.equal(evRes.calendar.events.length, 1)
+
+    const shownReminders = []
+    engine.store.events.on('reminder', (line) => shownReminders.push(line))
+    const due = engine.scheduler.remindFromCalendar(new Date(2026, 10, 27, 18, 35))
+    assert.deepEqual(due.map((d) => d.title), ['Filmabend'])
+    assert.equal(due[0].body, 'Um 19:00 Uhr, in 25 Min.')
+    assert.equal(shownReminders.length, 1)
+    assert.equal(engine.scheduler.remindFromCalendar(new Date(2026, 10, 27, 18, 40)).length, 0)
+    const frierenStatus = engine.store.getMerkItems().find((m) => m.id === 'frieren-id')?.status ?? 'watching'
+    const dueSeries = engine.scheduler.remindFromCalendar(new Date(2026, 10, 27, 19, 55))
+    assert.deepEqual(dueSeries.map((d) => d.title), frierenStatus === 'watching' ? ['Heute: Frieren'] : [])
+
+    const delRes = await fetch(`${engine.url}api/ad/calendar/event/delete`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: evRes.event.id }),
+    }).then((r) => r.json())
+    assert.equal(delRes.calendar.events.length, 0)
+
+    // Alter Wochenplan: fest eingestellter Tag (0 = Sonntag) wird einmalig zum Sendetag (6 = Sonntag).
+    const migrateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sondra-kal-'))
+    const fakeStore = {
+      events: new EventEmitter(),
+      getConfig: () => ({ seriesOverrides: { alt: { airDay: 0 }, geschaetzt: {} } }),
+      getMerkItems: () => [],
+    }
+    assert.deepEqual(createCalendarStore({ dataDir: migrateDir, store: fakeStore }).snapshot().airing, { alt: { weekday: 6 } })
+    fs.rmSync(migrateDir, { recursive: true, force: true })
     assert.ok(getSeriesUsedBytes(engine.store, 'frieren-id') > 0)
 
     const receivedRequests = []
