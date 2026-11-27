@@ -1,6 +1,17 @@
 {
   "versions": [
     {
+      "version": "1.0.7",
+      "date": "2026-11-27",
+      "items": [
+        "Neuer Reiter „Kalender“ – derselbe Kalender wie in Sondra: die Woche ab Montag mit echten Daten, eigene Termine mit Uhrzeit, Ende, Wiederholung, Notiz und Erinnerung sowie Serien mit selbst eingetragenem Sendetag. Er ersetzt den bisherigen Wochenplan in der Merkliste; nichts wird mehr geschätzt.",
+        "Erinnerungen aus dem Kalender kommen auch bei geschlossenem Fenster: als Hinweis in Sondra AD, als Windows-Meldung und auf Wunsch aufs Handy (Telegram, ntfy, Pushover, Discord).",
+        "Neue Folgen landen wieder im bestehenden Serienordner in Google Drive: Ordnernamen werden genau wie in Sondra gebildet (z. B. „Re:Zero“ statt „Re-Zero“), vorhandene Ordner werden über die Serie und tolerant über den Namen gefunden, und bereits doppelt angelegte Serienordner werden automatisch zusammengeführt.",
+        "Heruntergeladene Folgen lassen sich überall abspielen: Streams, die als HLS/MPEG-TS ankommen, werden verlustfrei in echtes MP4 umgepackt, statt mit falscher Endung gespeichert zu werden. Bereits hochgeladene, nicht abspielbare Folgen („wird noch für die Wiedergabe verarbeitet“) werden automatisch repariert oder neu geladen.",
+        "Hoster, die statt eines Videos eine Fehlerseite liefern, werden erkannt und sofort übersprungen; Sondra AD warnt außerdem, wenn die Google-Anmeldung nicht zu Sondra passt."
+      ]
+    },
+    {
       "version": "1.0.6",
       "date": "2026-11-25",
       "items": [

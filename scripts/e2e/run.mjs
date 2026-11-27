@@ -332,7 +332,7 @@ async function runE2E() {
 
     await page.click('footer button:has-text("Was ist neu in")')
     await page.waitForSelector('dialog:has-text("Was ist neu")')
-    await page.waitForSelector('dialog:has-text("1.0.6")')
+    await page.waitForSelector('dialog:has-text("1.0.7")')
     await page.keyboard.press('Escape')
 
     await page.click('header button[aria-label^="Erscheinungsbild"]')
