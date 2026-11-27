@@ -22,7 +22,7 @@ import {
   lastActivityAt,
   seasonFolderName,
   seasonPath,
-  seriesFolderName,
+  localSeriesFolderName,
 } from '../shared/merklisteMerge.mjs'
 import { sniffMediaFile } from './mediaCheck.mjs'
 import { resolveBindIpv4 } from './mediaTools.mjs'
@@ -979,7 +979,7 @@ export function createScheduler({
           }
 
           if (actionsSet.has('offload_local')) {
-            const destDir = path.join(cfg.localArchiveDir, seriesFolderName(title), seasonFolderName(season))
+            const destDir = path.join(cfg.localArchiveDir, localSeriesFolderName(title), seasonFolderName(season))
             const destFile = path.join(destDir, f.name)
             await driveService.downloadFileToLocal(f.id, destFile)
             await driveService.deleteFilePermanently(f.id)

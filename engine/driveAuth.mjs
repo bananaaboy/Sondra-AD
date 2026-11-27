@@ -591,9 +591,16 @@ export function createDriveAuth({
           const access = await getAccessToken(true)
           authData.account = await fetchAccountProfile(access)
           imported.driveTokenImported = true
-        } catch {
+        } catch (err) {
           persistAuth()
-          imported.driveTokenImported = Boolean(decryptedRefresh)
+          imported.driveTokenImported = false
+          imported.driveTokenError = String(err?.message ?? err)
+          store.addLog({
+            category: 'system',
+            level: 'warn',
+            title: 'Google-Drive-Anmeldung aus Sondra nicht übernommen',
+            message: `Google hat den Schlüssel der Sondra-App abgelehnt (${imported.driveTokenError}). Meist nutzen Sondra und Sondra AD unterschiedliche Google-Clients – dann bitte direkt im Browser anmelden.`,
+          })
         }
         persistAuth()
         store.events.emit('change', { type: 'drive-auth' })
@@ -721,6 +728,7 @@ export function createDriveAuth({
 
   return {
     getStatus,
+    getClientId: () => authData?.clientId || resolveCredentials().clientId || '',
     isConnected,
     getAccessToken,
     startAuthFlow,

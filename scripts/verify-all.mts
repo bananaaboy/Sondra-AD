@@ -21,7 +21,9 @@ import { decryptPairingBundle, encryptPairingBundle } from '../engine/driveAuth.
 import { checkRecord } from '../shared/deviceIdentity.mjs'
 import {
   folderMatchKey,
+  localSeriesFolderName,
   mergeShared,
+  seriesFolderName,
   normalizeMerkItem,
   readSharedMerkliste,
   seasonNumberFromFolderName,
@@ -1059,6 +1061,10 @@ async function main() {
     assert.equal(folderMatchKey('Kaguya-sama: Love is War'), folderMatchKey('Kaguya Sama Love Is War'))
     assert.equal(folderMatchKey('Für Elise'), folderMatchKey('Fuer Elise'))
     assert.notEqual(folderMatchKey('Frieren'), folderMatchKey('Frieren 2'))
+    // Drive-Ordnername exakt wie in der Sondra-App (src/lib/folder.ts), lokal Windows-tauglich.
+    assert.equal(seriesFolderName('Re:Zero - Starting Life?'), 'Re:Zero - Starting Life?')
+    assert.equal(seriesFolderName('Fate/Zero'), 'Fate-Zero')
+    assert.equal(localSeriesFolderName('Re:Zero - Starting Life?'), 'Re-Zero - Starting Life-')
     assert.equal(seasonNumberFromFolderName('Staffel 2'), 2)
     assert.equal(seasonNumberFromFolderName('Season 02'), 2)
     assert.equal(seasonNumberFromFolderName('S2'), 2)
@@ -1185,6 +1191,34 @@ async function main() {
     assert.equal(kaguyaDirs[0].name, 'Kaguya-sama: Love is War')
     const e2 = treeAfter.files.find((f) => f.name === 'Kaguya - S01E02.mp4')
     assert.equal(e2.path, 'Serien/Kaguya-sama: Love is War/Staffel 1/Kaguya - S01E02.mp4')
+
+    // Altlast aus Sondra AD ≤ 1.0.6: „Re-Zero“ (Doppelpunkt ersetzt) mit mehr Folgen als
+    // Sondras eigener Ordner „Re:Zero“ → zusammengeführt wird trotzdem in Sondras Ordner.
+    engine.store.saveMerkliste([
+      ...engine.store.getMerkItems(),
+      normalizeMerkItem({ id: 'rezero-id', title: 'Re:Zero', url: 'https://example.invalid/rezero', status: 'dropped' }),
+    ])
+    const sondraOwnId = await ds.ensureFolderPath(['Serien', 'Re:Zero', 'Staffel 1'])
+    await ds.putBytes([], 'Re Zero - S01E01.mp4', Buffer.from('\0\0\0\x18ftypisom-a', 'latin1'), {
+      mime: 'video/mp4',
+      appProperties: { sondraSerie: 'rezero-id', sondraStaffel: '1', sondraFolge: '1' },
+      folderId: sondraOwnId,
+    })
+    const legacyAdId = await ds.ensureFolderPath(['Serien', 'Re-Zero', 'Staffel 1'])
+    for (const ep of [2, 3]) {
+      await ds.putBytes([], `Re-Zero - S01E0${ep}.mp4`, Buffer.from(`\0\0\0\x18ftypisom-${ep}`, 'latin1'), {
+        mime: 'video/mp4',
+        appProperties: { sondraSerie: 'rezero-id', sondraStaffel: '1', sondraFolge: String(ep) },
+        folderId: legacyAdId,
+      })
+    }
+    await ds.syncMerkliste()
+    const treeRz = await ds.listSondraTree()
+    const rzDirs = treeRz.dirs.filter((d) => /^Serien\/Re.Zero$/.test(d.path))
+    assert.deepEqual(rzDirs.map((d) => d.name), ['Re:Zero'])
+    assert.equal(treeRz.files.filter((f) => f.path.startsWith('Serien/Re:Zero/Staffel 1/')).length, 3)
+    const rzNext = await ds.resolveSeasonFolder({ seriesId: 'rezero-id', seriesTitle: 'Re:Zero', season: 1 })
+    assert.equal(rzNext.folderId, sondraOwnId)
 
     if (realTs) {
       // Bereits hochgeladene MPEG-TS-Datei mit .mp4-Endung wird automatisch repariert.

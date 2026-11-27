@@ -6,11 +6,22 @@ export const HINT_KEYS = { series: 'sondraSerie', season: 'sondraStaffel', episo
 
 export const seasonFolderName = (season) => (Number(season) === 0 ? 'Filme' : `Staffel ${season}`)
 
+/**
+ * Name des Serienordners in Google Drive – exakt wie die Sondra-App ihn bildet
+ * (`src/lib/folder.ts`: nur Schrägstriche werden ersetzt). Doppelpunkte, Fragezeichen
+ * usw. bleiben erhalten, sonst entsteht neben „Re:Zero“ ein zweiter Ordner „Re-Zero“.
+ */
 export const seriesFolderName = (title) =>
   String(title ?? '')
     .replace(/[/\\]+/g, '-')
-    .replace(/[<>:"|?*\x00-\x1f]/g, '-')
     .replace(/\s+/g, ' ')
+    .trim() || 'Ohne Namen'
+
+/** Ordnername für lokale Festplatten/WebDAV: zusätzlich ohne Zeichen, die Windows verbietet. */
+export const localSeriesFolderName = (title) =>
+  seriesFolderName(title)
+    .replace(/[<>:"|?*\x00-\x1f]/g, '-')
+    .replace(/[. ]+$/, '')
     .trim() || 'Ohne Namen'
 
 /**

@@ -29,6 +29,8 @@ import {
 } from '../shared/merklisteMerge.mjs'
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder'
+/** Projektnummer des Google-Clients der Sondra-App (bananaaboy/Sondra, src/lib/googleDrive.ts). */
+const SONDRA_GOOGLE_PROJECT = '736809827454'
 const FILE_FIELDS = 'id,name,size,modifiedTime,createdTime,mimeType,parents,appProperties,trashedTime'
 const SIMPLE_LIMIT = 5 * 1024 * 1024
 const CHUNK_SIZE = 8 * 1024 * 1024
@@ -351,8 +353,9 @@ export function createDriveService({ dataDir, store, driveAuth, fetchImpl = fetc
     const wantedKey = folderMatchKey(wantedName)
     const children = await listChildFolders(rootId)
 
-    let series = null
-    if (seriesId) {
+    // Zuerst exakt der Name, den auch die Sondra-App verwendet – dann findet Sondra die Folgen sofort.
+    let series = children.find((c) => c.name === wantedName) || null
+    if (!series && seriesId) {
       const cacheKey = `${rootId}::${seriesId}`
       const cachedId = seriesIdFolderCache.get(cacheKey)
       if (cachedId) series = children.find((c) => c.id === cachedId) || null
@@ -361,7 +364,6 @@ export function createDriveService({ dataDir, store, driveAuth, fetchImpl = fetc
         if (foundId) series = children.find((c) => c.id === foundId) || null
       }
     }
-    if (!series) series = children.find((c) => c.name === wantedName) || null
     if (!series && wantedKey) series = children.find((c) => folderMatchKey(c.name) === wantedKey) || null
     if (!series) series = { id: await createFolder(wantedName, rootId), name: wantedName }
     if (seriesId) seriesIdFolderCache.set(`${rootId}::${seriesId}`, series.id)
@@ -486,7 +488,13 @@ export function createDriveService({ dataDir, store, driveAuth, fetchImpl = fetc
     for (const members of groups.values()) {
       if (members.length < 2) continue
       result.groups += 1
+      // Ordner, der genau so heißt, wie die Sondra-App ihn für einen Merklisten-Titel anlegt,
+      // gewinnt immer – sonst legt Sondra beim nächsten Einordnen wieder einen eigenen an.
+      const canonical = new Set(store.getMerkItems().map((i) => seriesFolderName(i.title)))
       members.sort((a, b) => {
+        const ca = canonical.has(a.name) ? 1 : 0
+        const cb = canonical.has(b.name) ? 1 : 0
+        if (ca !== cb) return cb - ca
         const diff = filesByTop.get(b.id).length - filesByTop.get(a.id).length
         if (diff !== 0) return diff
         return String(a.createdTime || '').localeCompare(String(b.createdTime || ''))
@@ -884,8 +892,31 @@ export function createDriveService({ dataDir, store, driveAuth, fetchImpl = fetc
   }
 
   let lastSyncedTree = null
+  let projectWarned = false
+
+  /**
+   * Google gibt mit dem Recht „drive.file“ nur Dateien frei, die eine App desselben
+   * Google-Cloud-Projekts angelegt hat. Nutzt Sondra AD einen Client aus einem anderen
+   * Projekt als die Sondra-App, sieht es deren „Sondra“-Ordner nicht und legt einen
+   * eigenen an. Das wird hier einmal pro Start deutlich im Protokoll gemeldet.
+   */
+  function warnIfForeignProject() {
+    if (projectWarned) return
+    const clientId = String(driveAuth.getClientId?.() || '')
+    const project = /^(\d+)-[a-z0-9]+\.apps\.googleusercontent\.com$/i.exec(clientId)?.[1]
+    if (!project) return
+    projectWarned = true
+    if (project === SONDRA_GOOGLE_PROJECT) return
+    store.addLog({
+      category: 'sync',
+      level: 'warn',
+      title: 'Google-Client gehört nicht zum Sondra-Projekt',
+      message: `Sondra AD verwendet einen Google-Client aus Projekt ${project}, die Sondra-App aus Projekt ${SONDRA_GOOGLE_PROJECT}. Google zeigt Sondra AD dann die Ordner und Folgen der Sondra-App nicht an – es entstehen eigene Ordner. Bitte in beiden Apps einen Client aus demselben Google-Cloud-Projekt verwenden.`,
+    })
+  }
 
   async function syncMerkliste() {
+    warnIfForeignProject()
     if (!driveAuth.isConnected()) return { ok: false, reason: 'not-connected' }
     const merkFolderId = await ensureFolderPath(['Merkliste'])
     let remoteFile = await findFileInFolder(merkFolderId, MERKLISTE_SQLITE)

@@ -18,9 +18,9 @@ import {
 import {
   folderMatchKey,
   hintProperties,
+  localSeriesFolderName,
   seasonFolderName,
   seasonNumberFromFolderName,
-  seriesFolderName,
 } from '../shared/merklisteMerge.mjs'
 import { extensionForKind, isFragmentedMp4, isNonMediaKind, sniffMediaFile, sniffMediaBuffer } from './mediaCheck.mjs'
 import { resolveBindIpv4 } from './mediaTools.mjs'
@@ -110,7 +110,7 @@ function findExistingLocalDir(baseDir, wantedName, matcher) {
 }
 
 function resolveLocalSeasonDir(baseDir, seriesTitle, season, scheme) {
-  const wantedSeries = seriesFolderName(seriesTitle)
+  const wantedSeries = localSeriesFolderName(seriesTitle)
   const key = folderMatchKey(wantedSeries)
   const seriesName =
     findExistingLocalDir(baseDir, wantedSeries, (n) => Boolean(key) && folderMatchKey(n) === key) || wantedSeries
@@ -1160,7 +1160,7 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
           true,
         )
         const targetSegments = job.seriesTitle
-          ? [seriesFolderName(job.seriesTitle), localSeasonDirName(job.season ?? 1, settings.localNamingScheme)]
+          ? [localSeriesFolderName(job.seriesTitle), localSeasonDirName(job.season ?? 1, settings.localNamingScheme)]
           : ['Heruntergeladen']
         const uploaded = await uploadFileToWebdav({
           url: settings.webdavUrl,
