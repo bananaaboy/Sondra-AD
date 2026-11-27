@@ -19,7 +19,16 @@ import { dispatchPushNotifications } from '../engine/pushNotify.mjs'
 import { testWebdavConnection, uploadFileToWebdav } from '../engine/webdavClient.mjs'
 import { decryptPairingBundle, encryptPairingBundle } from '../engine/driveAuth.mjs'
 import { checkRecord } from '../shared/deviceIdentity.mjs'
-import { mergeShared, normalizeMerkItem, readSharedMerkliste, sharedSqliteBytes } from '../shared/merklisteMerge.mjs'
+import {
+  folderMatchKey,
+  mergeShared,
+  normalizeMerkItem,
+  readSharedMerkliste,
+  seasonNumberFromFolderName,
+  sharedSqliteBytes,
+} from '../shared/merklisteMerge.mjs'
+import { sniffMediaBuffer } from '../engine/mediaCheck.mjs'
+import { spawnSync } from 'node:child_process'
 import { buildTrayIconPng } from '../desktop/trayIcon.mjs'
 import { makeStoreTiles } from './store-tiles.mjs'
 
@@ -1044,6 +1053,150 @@ async function main() {
     assert.equal(histClear.ok, true)
     assert.equal(Object.keys(histClear.episodeIndex.downloaded).length, 0)
     assert.ok(!histClear.queue.some((q) => q.status === 'completed'))
+
+    console.log('13. Prüfe Serienordner-Zuordnung, Zusammenführung doppelter Ordner & abspielbare MP4-Dateien …')
+    assert.equal(folderMatchKey("Frieren: Beyond Journey's End"), folderMatchKey('frieren - beyond journeys end'))
+    assert.equal(folderMatchKey('Kaguya-sama: Love is War'), folderMatchKey('Kaguya Sama Love Is War'))
+    assert.equal(folderMatchKey('Für Elise'), folderMatchKey('Fuer Elise'))
+    assert.notEqual(folderMatchKey('Frieren'), folderMatchKey('Frieren 2'))
+    assert.equal(seasonNumberFromFolderName('Staffel 2'), 2)
+    assert.equal(seasonNumberFromFolderName('Season 02'), 2)
+    assert.equal(seasonNumberFromFolderName('S2'), 2)
+    assert.equal(seasonNumberFromFolderName('Filme'), 0)
+    assert.equal(seasonNumberFromFolderName('Extras Teil 2'), null)
+
+    const tsPacket = Buffer.alloc(188 * 4)
+    for (let i = 0; i < 4; i += 1) tsPacket[i * 188] = 0x47
+    assert.equal(sniffMediaBuffer(tsPacket), 'ts')
+    assert.equal(sniffMediaBuffer(Buffer.from('\0\0\0\x18ftypisom\0\0\0\0', 'latin1')), 'mp4')
+    assert.equal(sniffMediaBuffer(Buffer.from('<!DOCTYPE html><html><body>403</body></html>')), 'html')
+    assert.equal(sniffMediaBuffer(Buffer.from('#EXTM3U\n#EXT-X-VERSION:3\nseg0.ts\n')), 'playlist')
+    assert.equal(sniffMediaBuffer(crypto.randomBytes(4096)), 'unknown')
+
+    const ffmpegAvailable = spawnSync('ffmpeg', ['-version']).status === 0
+    let realTs = null
+    if (ffmpegAvailable) {
+      const tsPath = path.join(workDir, 'probe.ts')
+      const gen = spawnSync('ffmpeg', [
+        '-y', '-loglevel', 'error',
+        '-f', 'lavfi', '-i', 'testsrc=duration=1:size=160x120:rate=10',
+        '-f', 'lavfi', '-i', 'sine=duration=1',
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest',
+        '-f', 'mpegts', tsPath,
+      ])
+      if (gen.status === 0) realTs = fs.readFileSync(tsPath)
+    }
+
+    if (realTs) {
+      // Hoster liefert eine m3u8-Liste unter ".mp4"-Adresse ohne passenden Content-Type:
+      // Ergebnis muss trotzdem ein echtes MP4 sein (kein MPEG-TS mit .mp4-Endung).
+      const sneakyServer = http.createServer((req, res) => {
+        if (req.url === '/video/sneaky.mp4') {
+          res.writeHead(200, { 'content-type': 'application/octet-stream' })
+          res.end('#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:1.0,\nseg0.ts\n#EXT-X-ENDLIST\n')
+          return
+        }
+        if (req.url === '/video/seg0.ts') {
+          res.writeHead(200, { 'content-type': 'video/mp2t' })
+          res.end(realTs)
+          return
+        }
+        if (req.url === '/video/blocked.mp4') {
+          res.writeHead(200, { 'content-type': 'application/octet-stream' })
+          res.end('<!DOCTYPE html><html><body>Zugriff verweigert</body></html>')
+          return
+        }
+        res.writeHead(404)
+        res.end()
+      })
+      await new Promise((r) => sneakyServer.listen(0, '127.0.0.1', () => r()))
+      const sneakyBase = `http://127.0.0.1:${sneakyServer.address().port}`
+      try {
+        const add = await fetch(`${engine.url}api/ad/queue/add`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ url: `${sneakyBase}/video/sneaky.mp4` }),
+        }).then((r) => r.json())
+        assert.equal(add.ok, true)
+        await waitUntil(() => engine.store.getQueue().find((j) => j.id === add.job.id)?.status === 'completed')
+        const done = engine.store.getQueue().find((j) => j.id === add.job.id)
+        assert.ok(done.localPath.endsWith('.mp4'))
+        const head = fs.readFileSync(done.localPath).subarray(0, 4096)
+        assert.equal(sniffMediaBuffer(head), 'mp4')
+
+        const addBlocked = await fetch(`${engine.url}api/ad/queue/add`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ url: `${sneakyBase}/video/blocked.mp4` }),
+        }).then((r) => r.json())
+        await waitUntil(() => {
+          const j = engine.store.getQueue().find((q) => q.id === addBlocked.job.id)
+          return j && j.status !== 'queued' && j.status !== 'downloading' && j.status !== 'uploading'
+        })
+        const blocked = engine.store.getQueue().find((q) => q.id === addBlocked.job.id)
+        assert.notEqual(blocked.status, 'completed')
+        assert.ok(!blocked.localPath)
+        engine.worker.cancelJob?.(addBlocked.job.id)
+      } finally {
+        await new Promise((r) => sneakyServer.close(() => r()))
+      }
+    } else {
+      console.log('   (FFmpeg nicht gefunden – MP4-Umpack-Prüfung übersprungen)')
+    }
+
+    await engine.driveAuth.setDirectRefreshToken({
+      refreshToken: 'mock-refresh',
+      accessToken: 'mock-access',
+      expiresIn: 3600,
+    })
+    const ds = engine.driveService
+    // Ordner, wie ihn Sondra selbst angelegt hat (andere Schreibweise als der Merklisten-Titel).
+    const origSeasonId = await ds.ensureFolderPath(['Serien', 'Kaguya-sama: Love is War', 'Staffel 1'])
+    await ds.putBytes([], 'Kaguya - S01E01.mp4', Buffer.from('\0\0\0\x18ftypisom-original-1', 'latin1'), {
+      mime: 'video/mp4',
+      appProperties: { sondraSerie: 'kaguya-id', sondraStaffel: '1', sondraFolge: '1' },
+      folderId: origSeasonId,
+    })
+    await ds.ensureFolderPath(['Serien', 'Kaguya-sama: Love is War', 'Season 02'])
+
+    const bySeriesId = await ds.resolveSeasonFolder({ seriesId: 'kaguya-id', seriesTitle: 'Kaguya (umbenannt)', season: 1 })
+    assert.deepEqual(bySeriesId.segments, ['Serien', 'Kaguya-sama: Love is War', 'Staffel 1'])
+    assert.equal(bySeriesId.folderId, origSeasonId)
+    const byName = await ds.resolveSeasonFolder({ seriesTitle: 'kaguya sama love is war', season: 2 })
+    assert.deepEqual(byName.segments, ['Serien', 'Kaguya-sama: Love is War', 'Season 02'])
+
+    // Gleichzeitige Aufrufe für eine neue Serie dürfen nur EINEN Ordner anlegen.
+    const parallel = await Promise.all(
+      [1, 2, 3].map(() => ds.resolveSeasonFolder({ seriesTitle: 'Neue Serie', season: 1 })),
+    )
+    assert.equal(new Set(parallel.map((p) => p.folderId)).size, 1)
+
+    // Altlast: doppelter Ordner mit abweichender Schreibweise → wird beim Abgleich zusammengeführt.
+    const dupSeasonId = await ds.ensureFolderPath(['Serien', 'Kaguya Sama - Love Is War', 'Staffel 1'])
+    await ds.putBytes([], 'Kaguya - S01E02.mp4', Buffer.from('\0\0\0\x18ftypisom-neu-2', 'latin1'), {
+      mime: 'video/mp4',
+      appProperties: { sondraSerie: 'kaguya-id', sondraStaffel: '1', sondraFolge: '2' },
+      folderId: dupSeasonId,
+    })
+    await ds.syncMerkliste()
+    const treeAfter = await ds.listSondraTree()
+    const kaguyaDirs = treeAfter.dirs.filter((d) => /^Serien\/[^/]+$/.test(d.path) && /kaguya/i.test(d.name))
+    assert.equal(kaguyaDirs.length, 1)
+    assert.equal(kaguyaDirs[0].name, 'Kaguya-sama: Love is War')
+    const e2 = treeAfter.files.find((f) => f.name === 'Kaguya - S01E02.mp4')
+    assert.equal(e2.path, 'Serien/Kaguya-sama: Love is War/Staffel 1/Kaguya - S01E02.mp4')
+
+    if (realTs) {
+      // Bereits hochgeladene MPEG-TS-Datei mit .mp4-Endung wird automatisch repariert.
+      const broken = await ds.putBytes([], 'Kaguya - S01E03.mp4', realTs, {
+        mime: 'video/mp4',
+        appProperties: { sondraSerie: 'kaguya-id', sondraStaffel: '1', sondraFolge: '3' },
+        folderId: origSeasonId,
+      })
+      await engine.scheduler.runCheckCycle({ reason: 'manual', seriesId: 'gibt-es-nicht' })
+      const repairedBytes = await ds.readFileBytes(broken.id)
+      assert.equal(sniffMediaBuffer(Buffer.from(repairedBytes).subarray(0, 4096)), 'mp4')
+    }
 
     console.log('Alle Prüfungen erfolgreich bestanden.')
   } finally {

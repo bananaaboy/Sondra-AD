@@ -24,6 +24,7 @@ import {
   seasonPath,
   seriesFolderName,
 } from '../shared/merklisteMerge.mjs'
+import { sniffMediaFile } from './mediaCheck.mjs'
 import { resolveBindIpv4 } from './mediaTools.mjs'
 
 export function buildReleaseCalendar(merkItems, config, episodeIndex, nextCheckAt = null) {
@@ -355,6 +356,103 @@ export function createScheduler({
     return { checked: true, queued: queuedCount, metadataChanged: false }
   }
 
+  async function resolveDriveTarget(root, seriesId, title, season) {
+    if (typeof driveService.resolveSeasonFolder === 'function') {
+      return driveService.resolveSeasonFolder({ root, seriesId: seriesId || null, seriesTitle: title, season })
+    }
+    const segments = root === 'Archiv' ? archiveSeasonPath(title, season) : seasonPath(title, season)
+    return { segments, folderId: null }
+  }
+
+  let mediaRepairRunning = false
+
+  /**
+   * Repariert bereits hochgeladene, nicht abspielbare Folgen:
+   * MPEG-TS unter ".mp4" wird mit FFmpeg verlustfrei in echtes MP4 umgepackt und an
+   * derselben Stelle ersetzt; HTML-/Text-Müll kommt in den Papierkorb und wird neu geladen.
+   */
+  async function repairBrokenDriveMedia() {
+    if (mediaRepairRunning || !driveAuth.isConnected()) return { repaired: 0, requeued: 0 }
+    const tree = driveService.getLastSyncedTree?.()
+    if (!tree) return { repaired: 0, requeued: 0 }
+    mediaRepairRunning = true
+    let repaired = 0
+    let requeued = 0
+    try {
+      const broken = await driveService.findBrokenDriveMedia(tree).catch(() => [])
+      for (const f of broken) {
+        const where = f.path || f.name
+        if (f.kind === 'ts') {
+          if (!mediaTools.findFfmpeg()) {
+            driveService.markMediaChecked(f)
+            store.addLog({
+              category: 'download',
+              level: 'warn',
+              title: 'Folge im TS-Format — FFmpeg fehlt',
+              message: `${where} ist ein HLS-Mitschnitt mit .mp4-Endung und lässt sich in Drive/Browser nicht abspielen. Nach der Installation von FFmpeg repariert Sondra AD die Datei automatisch.`,
+            })
+            continue
+          }
+          const workDir = path.join(store.getConfig().tempDir, `reparatur-${f.id}`)
+          try {
+            fs.mkdirSync(workDir, { recursive: true })
+            const src = path.join(workDir, 'quelle.ts')
+            const out = path.join(workDir, 'fertig.mp4')
+            await driveService.downloadFileToLocal(f.id, src)
+            const ok = await mediaTools.remuxToMp4({ inputFile: src, outputFile: out })
+            if (ok && sniffMediaFile(out) === 'mp4') {
+              const updated = await driveService.uploadFileToDrive([], f.name, out, {
+                folderId: (f.parents ?? [])[0],
+                mime: 'video/mp4',
+                replaceExisting: true,
+              })
+              driveService.markMediaChecked(updated)
+              repaired += 1
+              store.addLog({
+                category: 'download',
+                title: `Folge repariert: ${f.name}`,
+                message: `${where} war ein HLS-Mitschnitt (MPEG-TS) mit .mp4-Endung und wurde verlustfrei in ein abspielbares MP4 umgepackt.`,
+              })
+              continue
+            }
+          } catch (err) {
+            store.addLog({
+              category: 'download',
+              level: 'warn',
+              title: `Reparatur fehlgeschlagen: ${f.name}`,
+              message: String(err?.message ?? err),
+            })
+          } finally {
+            try {
+              fs.rmSync(workDir, { recursive: true, force: true })
+            } catch {}
+          }
+        }
+        if (!f.hint) {
+          driveService.markMediaChecked(f)
+          continue
+        }
+        try {
+          await driveService.setTrashed(f.id, true)
+          store.unmarkEpisode(f.hint.series, f.hint.season, f.hint.episode)
+          requeued += 1
+          store.addLog({
+            category: 'download',
+            level: 'warn',
+            title: `Defekte Folge entfernt: ${f.name}`,
+            message: `${where} enthielt kein abspielbares Video und liegt jetzt im Google-Drive-Papierkorb. Die Folge wird bei der nächsten Prüfung neu geladen.`,
+            seriesId: f.hint.series,
+            season: f.hint.season,
+            episode: f.hint.episode,
+          })
+        } catch {}
+      }
+    } finally {
+      mediaRepairRunning = false
+    }
+    return { repaired, requeued }
+  }
+
   async function runCheckCycle({ reason = 'auto', seriesId = null } = {}) {
     if (checkRunning) return { ok: false, busy: true }
     checkRunning = true
@@ -370,6 +468,7 @@ export function createScheduler({
             message: String(err?.message ?? err),
           })
         })
+        await repairBrokenDriveMedia().catch(() => null)
       }
 
       const items = store.getMerkItems()
@@ -909,10 +1008,12 @@ export function createScheduler({
               })
               const uploadSource = compressed ? compPath : rawPath
               const uploadName = compressed ? compName : f.name
-              const targetSegs = archiveSeasonPath(title, season)
+              const target = await resolveDriveTarget('Archiv', f.hint?.series, title, season)
+              const targetSegs = target.segments
               const uploaded = await driveService.uploadFileToDrive(targetSegs, uploadName, uploadSource, {
                 mime: 'video/mp4',
                 appProperties: f.hint ? hintProperties(f.hint) : undefined,
+                folderId: target.folderId,
               })
               await driveService.deleteFilePermanently(f.id)
               if (f.hint) {
@@ -928,12 +1029,14 @@ export function createScheduler({
               fs.rmSync(workDir, { recursive: true, force: true })
             }
           } else if (actionsSet.has('drive_archive')) {
-            const targetSegs = archiveSeasonPath(title, season)
+            const target = await resolveDriveTarget('Archiv', f.hint?.series, title, season)
+            const targetSegs = target.segments
             const moved = await driveService.moveDriveFile(
               f.id,
               targetSegs,
               f.parents,
               f.hint ? hintProperties(f.hint) : undefined,
+              target.folderId,
             )
             if (f.hint) {
               store.markEpisodeArchived(f.hint.series, season, episode, {
@@ -983,13 +1086,25 @@ export function createScheduler({
   }
 
   async function restoreFromArchive({ driveFileId = null, localArchivePath = null, seriesId = null, season = 1, episode = 1, seriesTitle = 'Serie' }) {
-    const targetSegs = seasonPath(seriesTitle, season)
+    let targetSegs = seasonPath(seriesTitle, season)
+    let targetFolderId = null
+    if (driveAuth.isConnected() && (driveFileId || localArchivePath)) {
+      const target = await resolveDriveTarget('Serien', seriesId, seriesTitle, season)
+      targetSegs = target.segments
+      targetFolderId = target.folderId
+    }
     const props = seriesId ? hintProperties({ series: seriesId, season, episode }) : undefined
 
     if (driveFileId) {
       const tree = await driveService.listSondraTree()
       const existing = tree.files.find((f) => f.id === driveFileId)
-      const moved = await driveService.moveDriveFile(driveFileId, targetSegs, existing?.parents || [], props)
+      const moved = await driveService.moveDriveFile(
+        driveFileId,
+        targetSegs,
+        existing?.parents || [],
+        props,
+        targetFolderId,
+      )
       if (seriesId) {
         store.markEpisodeDownloaded(seriesId, season, episode, {
           driveFileId: moved.id,
@@ -1011,6 +1126,7 @@ export function createScheduler({
       const uploaded = await driveService.uploadFileToDrive(targetSegs, fileName, localArchivePath, {
         mime: 'video/mp4',
         appProperties: props,
+        folderId: targetFolderId,
       })
       fs.rmSync(localArchivePath, { force: true })
       if (seriesId) {

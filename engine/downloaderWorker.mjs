@@ -15,7 +15,14 @@ import {
   isPodcastOrRssUrl,
   isSpotifyUrl,
 } from '../api/extractors.js'
-import { hintProperties, seasonFolderName, seasonPath, seriesFolderName } from '../shared/merklisteMerge.mjs'
+import {
+  folderMatchKey,
+  hintProperties,
+  seasonFolderName,
+  seasonNumberFromFolderName,
+  seriesFolderName,
+} from '../shared/merklisteMerge.mjs'
+import { extensionForKind, isFragmentedMp4, isNonMediaKind, sniffMediaFile, sniffMediaBuffer } from './mediaCheck.mjs'
 import { resolveBindIpv4 } from './mediaTools.mjs'
 import { dispatchPushNotifications } from './pushNotify.mjs'
 import { deleteWebdavFile, uploadFileToWebdav } from './webdavClient.mjs'
@@ -79,6 +86,40 @@ export function getSeriesUsedBytes(store, seriesId) {
     }
   }
   return total
+}
+
+function streamSlugOf(rawUrl) {
+  const m = String(rawUrl || '').match(/\/(?:anime|serie)\/stream\/([^/?#]+)/i)
+  return m ? m[1].toLowerCase() : null
+}
+
+/**
+ * Sucht unter `baseDir` einen bereits vorhandenen Ordner mit gleichem Namen
+ * (unabhängig von Groß-/Kleinschreibung und Sonderzeichen) und gibt dessen Namen zurück.
+ */
+function findExistingLocalDir(baseDir, wantedName, matcher) {
+  try {
+    const entries = fs.readdirSync(baseDir, { withFileTypes: true }).filter((e) => e.isDirectory())
+    const exact = entries.find((e) => e.name === wantedName)
+    if (exact) return exact.name
+    const hit = entries.find((e) => matcher(e.name))
+    return hit ? hit.name : null
+  } catch {
+    return null
+  }
+}
+
+function resolveLocalSeasonDir(baseDir, seriesTitle, season, scheme) {
+  const wantedSeries = seriesFolderName(seriesTitle)
+  const key = folderMatchKey(wantedSeries)
+  const seriesName =
+    findExistingLocalDir(baseDir, wantedSeries, (n) => Boolean(key) && folderMatchKey(n) === key) || wantedSeries
+  const seriesDir = path.join(baseDir, seriesName)
+  const wantedSeason = localSeasonDirName(season, scheme)
+  const seasonNum = Number(season)
+  const seasonName =
+    findExistingLocalDir(seriesDir, wantedSeason, (n) => seasonNumberFromFolderName(n) === seasonNum) || wantedSeason
+  return { dir: path.join(seriesDir, seasonName), segments: [seriesName, seasonName] }
 }
 
 function localSeasonDirName(season, scheme) {
@@ -156,10 +197,13 @@ async function streamUrlToFile(url, destFile, { referer, localAddress, maxBandwi
   }
   const total = Number(res.headers.get('content-length')) || 0
   const contentType = String(res.headers.get('content-type') || '')
+  // HLS-Segmente sind MPEG-TS – niemals unter ".mp4" ablegen, sonst ist die Datei
+  // für Drive, Browser und Windows-Player unbrauchbar. Später wird sie umgepackt.
+  const hlsDest = /\.ts$/i.test(destFile) ? destFile : destFile.replace(/\.[^./\\]+$/, '') + '.ts'
   if (/mpegurl/i.test(contentType) || /\.m3u8(?:$|\?)/i.test(url)) {
     const text = await res.text()
-    if (text.trimStart().startsWith('#EXTM3U')) {
-      return downloadHlsSegmentsNative(text, res.url || url, destFile, {
+    if (text.replace(/^\uFEFF/, '').trimStart().startsWith('#EXTM3U')) {
+      return downloadHlsSegmentsNative(text, res.url || url, hlsDest, {
         referer,
         localAddress,
         maxBandwidthKbps,
@@ -167,20 +211,64 @@ async function streamUrlToFile(url, destFile, { referer, localAddress, maxBandwi
         signal,
       })
     }
+    throw new Error('Hoster lieferte statt eines Videos eine ungültige Wiedergabeliste.')
   }
 
   const reader = res.body?.getReader()
   if (!reader) throw new Error('Stream enthielt keine Daten.')
+
+  // Erste Bytes ansehen: Manche Hoster schicken die m3u8-Liste ohne passenden Content-Type.
+  let firstChunk = null
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (value && value.byteLength > 0) {
+      firstChunk = value
+      break
+    }
+  }
+  if (!firstChunk) throw new Error('Empfangene Datei war leer (0 Bytes).')
+  const firstKind = sniffMediaBuffer(Buffer.from(firstChunk.buffer, firstChunk.byteOffset, Math.min(firstChunk.byteLength, 4096)))
+  if (firstKind === 'playlist') {
+    const parts = [Buffer.from(firstChunk)]
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      parts.push(Buffer.from(value))
+    }
+    return downloadHlsSegmentsNative(Buffer.concat(parts).toString('utf8'), res.url || url, hlsDest, {
+      referer,
+      localAddress,
+      maxBandwidthKbps,
+      onProgress,
+      signal,
+    })
+  }
+  if (firstKind === 'html') {
+    try {
+      await reader.cancel()
+    } catch {}
+    throw new Error('Hoster lieferte statt eines Videos eine Webseite (vermutlich gesperrt oder abgelaufen).')
+  }
+
   fs.mkdirSync(path.dirname(destFile), { recursive: true })
   const out = fs.createWriteStream(destFile)
   let loaded = 0
   const startedAt = Date.now()
   let lastReport = 0
+  let pendingChunk = firstChunk
 
   try {
     for (;;) {
       if (signal?.aborted) throw new Error('Abgebrochen')
-      const { done, value } = await reader.read()
+      let done = false
+      let value
+      if (pendingChunk) {
+        value = pendingChunk
+        pendingChunk = null
+      } else {
+        ;({ done, value } = await reader.read())
+      }
       if (done) break
       loaded += value.byteLength
       if (!out.write(Buffer.from(value))) {
@@ -447,6 +535,78 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
     }
   }
 
+  /**
+   * Stellt sicher, dass am Ende eine abspielbare Datei hochgeladen wird:
+   * - HTML-Fehlerseiten, m3u8-Listen und leere Dateien werden abgelehnt (→ nächster Hoster),
+   * - MPEG-TS (HLS) und fragmentiertes MP4 werden mit FFmpeg verlustfrei in ein normales MP4
+   *   mit vorgezogenem Index umgepackt, das Drive, Browser und Windows-Player direkt abspielen,
+   * - stimmt die Dateiendung nicht zum Inhalt, wird sie korrigiert.
+   * Gibt den (ggf. neuen) Pfad zurück.
+   */
+  async function ensurePlayableMedia(filePath, { mode = 'video', signal } = {}) {
+    const kind = sniffMediaFile(filePath)
+    if (isNonMediaKind(kind)) {
+      try {
+        fs.rmSync(filePath, { force: true })
+      } catch {}
+      const what =
+        kind === 'html'
+          ? 'eine Webseite'
+          : kind === 'playlist'
+            ? 'nur eine Wiedergabeliste'
+            : kind === 'empty'
+              ? 'eine leere Datei'
+              : 'Text'
+      throw new Error(`Hoster lieferte ${what} statt einer Videodatei.`)
+    }
+
+    const ext = path.extname(filePath).replace(/^\./, '').toLowerCase()
+    const base = filePath.slice(0, filePath.length - path.extname(filePath).length)
+    const wantsMp4Remux =
+      mode !== 'audio' && (kind === 'ts' || (kind === 'mp4' && isFragmentedMp4(filePath)))
+
+    if (wantsMp4Remux && mediaTools.findFfmpeg()) {
+      const target = `${base}${ext === 'mp4' ? '.remux' : ''}.mp4`
+      const ok = await mediaTools.remuxToMp4({ inputFile: filePath, outputFile: target, signal })
+      if (ok && sniffMediaFile(target) === 'mp4') {
+        if (target !== filePath) {
+          try {
+            fs.rmSync(filePath, { force: true })
+          } catch {}
+        }
+        const finalPath = `${base}.mp4`
+        if (target !== finalPath) fs.renameSync(target, finalPath)
+        return finalPath
+      }
+      try {
+        fs.rmSync(target, { force: true })
+      } catch {}
+      if (signal?.aborted) throw new Error('Abgebrochen')
+      store.addLog({
+        category: 'download',
+        level: 'warn',
+        title: 'Umwandlung in MP4 fehlgeschlagen',
+        message: `${path.basename(filePath)} konnte nicht in ein normales MP4 umgepackt werden und wird im Originalformat gespeichert.`,
+      })
+    } else if (kind === 'ts' && mode !== 'audio') {
+      store.addLog({
+        category: 'download',
+        level: 'warn',
+        title: 'FFmpeg fehlt — Folge bleibt im TS-Format',
+        message: `${path.basename(filePath)} ist ein HLS-Mitschnitt (MPEG-TS). Ohne FFmpeg kann Sondra AD ihn nicht in MP4 umpacken; Google Drive und Browser spielen .ts-Dateien meist nicht ab. Bitte FFmpeg installieren.`,
+      })
+    }
+
+    const wantedExt = extensionForKind(kind)
+    const audioContainer = ['mp3', 'aac', 'flac', 'ogg', 'wav'].includes(kind)
+    if (wantedExt && wantedExt !== ext && !(audioContainer && mode === 'audio' && ext)) {
+      const renamed = `${base}.${wantedExt}`
+      fs.renameSync(filePath, renamed)
+      return renamed
+    }
+    return filePath
+  }
+
   function isDirectSupportedUrl(target) {
     return (
       isAniworldUrl(target) ||
@@ -471,7 +631,38 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
     await dispatchPushNotifications(cfg, { title, body: message, level }).catch(() => {})
   }
 
-  async function executeSingleJob(job) {
+  /**
+   * Ordnet einen Auftrag der passenden Serie aus der Merkliste zu, damit die Folge im
+   * bestehenden Serienordner landet – auch wenn der Link manuell eingeworfen wurde und
+   * der Titel nur aus der Adresse abgeleitet ist („Frieren Beyond Journeys End“ statt
+   * „Frieren: Beyond Journey's End“).
+   */
+  function withSeriesIdentity(job) {
+    const items = store.getMerkItems()
+    if (job.seriesId) {
+      const item = items.find((i) => i.id === job.seriesId)
+      return item?.title && item.title !== job.seriesTitle ? { ...job, seriesTitle: item.title } : job
+    }
+    if (typeof job.season !== 'number' || typeof job.episode !== 'number') return job
+    const slug = streamSlugOf(job.url)
+    const key = job.seriesTitle ? folderMatchKey(job.seriesTitle) : ''
+    const match =
+      (slug && items.find((i) => streamSlugOf(i.url) === slug)) ||
+      (key && items.find((i) => i.title && folderMatchKey(i.title) === key)) ||
+      null
+    return match ? { ...job, seriesId: match.id, seriesTitle: match.title || job.seriesTitle } : job
+  }
+
+  async function executeSingleJob(rawJob) {
+    let job = rawJob
+    try {
+      job = withSeriesIdentity(rawJob)
+      if (job.seriesId !== rawJob.seriesId || job.seriesTitle !== rawJob.seriesTitle) {
+        store.patchQueueItem(job.id, { seriesId: job.seriesId, seriesTitle: job.seriesTitle })
+      }
+    } catch {
+      job = rawJob
+    }
     const controller = new AbortController()
     activeControllers.set(job.id, controller)
     const settings = effectiveSettingsForJob(job)
@@ -541,7 +732,9 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
               url: ep.url,
               title: ep.title || `${extracted.title || job.title} - ${i + 1}`,
               seriesId: job.seriesId || null,
-              seriesTitle: extracted.seriesTitle || job.seriesTitle || extracted.title || null,
+              seriesTitle: job.seriesId
+                ? job.seriesTitle || extracted.seriesTitle || extracted.title || null
+                : extracted.seriesTitle || job.seriesTitle || extracted.title || null,
               season: typeof ep.seasonNumber === 'number' ? ep.seasonNumber : job.season ?? 1,
               episode: typeof ep.episodeNumber === 'number' ? ep.episodeNumber : i + 1,
               language: job.language,
@@ -714,10 +907,20 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
                 })
               }
 
+              downloadedPath = await ensurePlayableMedia(downloadedPath, {
+                mode: settings.mode,
+                signal: controller.signal,
+              })
               usedHoster = providerName
               finalFileName = path.basename(downloadedPath)
               break
             } catch (streamErr) {
+              if (downloadedPath) {
+                try {
+                  fs.rmSync(downloadedPath, { force: true })
+                } catch {}
+              }
+              downloadedPath = null
               if (controller.signal.aborted) throw streamErr
               lastStreamError = streamErr
               triedHosters.push(`${providerName} (${streamErr?.message || 'Fehler'})`)
@@ -761,10 +964,21 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
                     etaSeconds: p.etaSeconds,
                   }),
               })
+              downloadedPath = await ensurePlayableMedia(downloadedPath, {
+                mode: settings.mode,
+                signal: controller.signal,
+              })
               usedHoster = `${stream.provider || 'Stream'} · yt-dlp`
               finalFileName = path.basename(downloadedPath)
               break
             } catch (ytdlpStreamErr) {
+              if (downloadedPath) {
+                try {
+                  fs.rmSync(downloadedPath, { force: true })
+                } catch {}
+              }
+              downloadedPath = null
+              if (controller.signal.aborted) throw ytdlpStreamErr
               if (!lastStreamError) lastStreamError = ytdlpStreamErr
             }
           }
@@ -844,6 +1058,11 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
         }
       }
 
+      // Für alle Wege (yt-dlp, Direkt-Link, Spotify …) noch einmal sicherstellen,
+      // dass eine abspielbare Datei mit passender Endung hochgeladen wird.
+      downloadedPath = await ensurePlayableMedia(downloadedPath, { mode: settings.mode, signal: controller.signal })
+      finalFileName = path.basename(downloadedPath)
+
       const fileSize = fs.statSync(downloadedPath).size
       const ext = path.extname(finalFileName)
       const mime = mimeForExt(ext, settings.mode)
@@ -879,9 +1098,19 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
           },
           true,
         )
-        const targetSegments = job.seriesTitle
-          ? seasonPath(job.seriesTitle, job.season ?? 1)
-          : ['Heruntergeladen']
+        let targetSegments = ['Heruntergeladen']
+        let targetFolderId = null
+        if (job.seriesTitle) {
+          // Bestehenden Serien-/Staffelordner wiederverwenden (über Serien-ID der vorhandenen
+          // Folgen oder tolerant verglichenen Namen) statt blind einen neuen anzulegen.
+          const resolved = await driveService.resolveSeasonFolder({
+            seriesId: job.seriesId || null,
+            seriesTitle: job.seriesTitle,
+            season: job.season ?? 1,
+          })
+          targetSegments = resolved.segments
+          targetFolderId = resolved.folderId
+        }
         const appProperties =
           job.seriesId && typeof job.season === 'number' && typeof job.episode === 'number'
             ? hintProperties({ series: job.seriesId, season: job.season, episode: job.episode })
@@ -891,6 +1120,7 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
         driveFile = await driveService.uploadFileToDrive(targetSegments, finalFileName, downloadedPath, {
           mime,
           appProperties,
+          folderId: targetFolderId,
           signal: controller.signal,
           onProgress: (loaded, total) => {
             const elapsed = Math.max(0.2, (Date.now() - upStart) / 1000)
@@ -910,11 +1140,7 @@ export function createDownloaderWorker({ store, driveAuth, driveService, mediaTo
       let savedLocalPath = null
       if (effectiveWantsLocal) {
         const subDir = job.seriesTitle
-          ? path.join(
-              settings.localDir,
-              seriesFolderName(job.seriesTitle),
-              localSeasonDirName(job.season ?? 1, settings.localNamingScheme),
-            )
+          ? resolveLocalSeasonDir(settings.localDir, job.seriesTitle, job.season ?? 1, settings.localNamingScheme).dir
           : settings.localDir
         fs.mkdirSync(subDir, { recursive: true })
         savedLocalPath = path.join(subDir, finalFileName)

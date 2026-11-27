@@ -495,9 +495,50 @@ export function createMediaTools({ dataDir, store, fetchImpl = fetch }) {
     } else {
       args.push('-c', 'copy', '-bsf:a', 'aac_adtstoasc')
     }
+    if (/\.(?:mp4|m4v|m4a|mov)$/i.test(outputFile)) args.push('-movflags', '+faststart')
     args.push(outputFile)
     const res = await runProcess(bin, args, { timeoutMs: 3 * 60 * 60_000, signal })
     return res.code === 0 && fs.existsSync(outputFile) && fs.statSync(outputFile).size > 0
+  }
+
+  /**
+   * Packt eine bereits geladene Datei (z. B. MPEG-TS aus HLS-Segmenten oder fragmentiertes MP4)
+   * ohne Neukodierung in ein normales MP4 mit vorgezogenem Index um, damit Google Drive,
+   * Browser und Windows-Player sie direkt abspielen können. Klappt das Kopieren der
+   * Tonspur nicht, wird nur der Ton nach AAC umgewandelt.
+   */
+  async function remuxToMp4({ inputFile, outputFile, signal }) {
+    const bin = findFfmpeg()
+    if (!bin) return false
+    const attempt = async (audioArgs) => {
+      try {
+        fs.rmSync(outputFile, { force: true })
+      } catch {}
+      const args = [
+        '-y',
+        '-i',
+        inputFile,
+        '-map',
+        '0:v:0?',
+        '-map',
+        '0:a?',
+        '-c:v',
+        'copy',
+        ...audioArgs,
+        '-movflags',
+        '+faststart',
+        outputFile,
+      ]
+      const res = await runProcess(bin, args, { timeoutMs: 2 * 60 * 60_000, signal })
+      return res.code === 0 && fs.existsSync(outputFile) && fs.statSync(outputFile).size > 0
+    }
+    if (await attempt(['-c:a', 'copy', '-bsf:a', 'aac_adtstoasc'])) return true
+    if (signal?.aborted) return false
+    if (await attempt(['-c:a', 'aac', '-b:a', '192k'])) return true
+    try {
+      fs.rmSync(outputFile, { force: true })
+    } catch {}
+    return false
   }
 
   async function compressVideoForArchive({ inputFile, outputFile, maxHeight = 720, useGpu = true, signal }) {
@@ -559,6 +600,7 @@ export function createMediaTools({ dataDir, store, fetchImpl = fetch }) {
     listPlaylistEntries,
     downloadViaYtdlp,
     remuxHlsWithFfmpeg,
+    remuxToMp4,
     compressVideoForArchive,
     getToolsStatus,
   }

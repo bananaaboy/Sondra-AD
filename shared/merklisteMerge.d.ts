@@ -58,6 +58,8 @@ export interface EpisodeHint {
 
 export function seasonFolderName(season: number): string
 export function seriesFolderName(title: string): string
+export function folderMatchKey(name: string): string
+export function seasonNumberFromFolderName(name: string): number | null
 export function seasonPath(title: string, season: number): string[]
 export function archiveSeasonPath(title: string, season: number): string[]
 export function hintProperties(hint: EpisodeHint): Record<string, string>

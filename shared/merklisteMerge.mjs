@@ -13,6 +13,34 @@ export const seriesFolderName = (title) =>
     .replace(/\s+/g, ' ')
     .trim() || 'Ohne Namen'
 
+/**
+ * Vergleichsschlüssel für Serienordner: ignoriert Groß-/Kleinschreibung, Akzente,
+ * Umlaut-Schreibweisen und alle Satz-/Sonderzeichen. So landen „Frieren: Beyond
+ * Journey's End“, „Frieren - Beyond Journeys End“ und „frieren beyond journeys end“
+ * im selben Ordner.
+ */
+export function folderMatchKey(name) {
+  return String(name ?? '')
+    .toLowerCase()
+    .replace(/ä/g, 'ae')
+    .replace(/ö/g, 'oe')
+    .replace(/ü/g, 'ue')
+    .replace(/ß/g, 'ss')
+    .replace(/&/g, 'und')
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/\band\b/g, 'und')
+    .replace(/[^\p{L}\p{N}]+/gu, '')
+}
+
+/** Liest die Staffelnummer aus einem Ordnernamen („Staffel 2“, „Season 02“, „S2“, „Filme“, „Specials“). */
+export function seasonNumberFromFolderName(name) {
+  const s = String(name ?? '').trim()
+  if (/^(?:filme?|movies?|specials?|extras?)$/i.test(s)) return 0
+  const m = s.match(/^(?:staffel|season|s)\s*[-_.]?\s*0*(\d{1,3})$/i)
+  return m ? Number(m[1]) : null
+}
+
 export const seasonPath = (title, season) => ['Serien', seriesFolderName(title), seasonFolderName(season)]
 
 export const archiveSeasonPath = (title, season) => ['Archiv', seriesFolderName(title), seasonFolderName(season)]
